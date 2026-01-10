@@ -494,11 +494,11 @@ HTML_CONTENT = """
         const SESSION_KEY = 'agent-terminal-pro-state';
         const PROJECTS_KEY = 'agent-terminal-projects';
         const AGENT_CONFIG = {
-            claude:   { icon: '🔵', name: 'Claude',   color: '#7aa2f7' },
-            gemini:   { icon: '🟢', name: 'Gemini',   color: '#9ece6a' },
-            codex:    { icon: '🟠', name: 'Codex',    color: '#ff9e64' },
-            opencode: { icon: '🟣', name: 'OpenCode', color: '#bb9af7' },
-            shell:    { icon: '⚪', name: 'Shell',    color: '#a9b1d6' }
+            claude:   { icon: '🔵', name: 'Claude',   color: '#7aa2f7', multiInstance: true },
+            gemini:   { icon: '🟢', name: 'Gemini',   color: '#9ece6a', multiInstance: false },  // No UUID session support
+            codex:    { icon: '🟠', name: 'Codex',    color: '#ff9e64', multiInstance: false },  // No UUID session support
+            opencode: { icon: '🟣', name: 'OpenCode', color: '#bb9af7', multiInstance: true },
+            shell:    { icon: '⚪', name: 'Shell',    color: '#a9b1d6', multiInstance: true }
         };
 
         // ========== State ==========
@@ -683,6 +683,11 @@ HTML_CONTENT = """
             return Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
         }
 
+        function generateUUID() {
+            // Generate valid UUID v4 for CLI session IDs
+            return crypto.randomUUID();
+        }
+
         // ========== Toast ==========
         function showToast(msg, type = 'info') {
             const container = document.getElementById('toastContainer');
@@ -807,10 +812,21 @@ HTML_CONTENT = """
 
         function confirmAgentSelect() {
             const role = document.getElementById('agentSelectRole').value;
+            const cfg = AGENT_CONFIG[selectedAgentType];
+
+            // 단일 인스턴스 에이전트 중복 체크
+            if (!cfg.multiInstance) {
+                const existing = terminals.find(t => t.type === selectedAgentType);
+                if (existing) {
+                    showToast(`${cfg.icon} ${cfg.name}은(는) 하나만 실행 가능합니다`, 'warning');
+                    return;
+                }
+            }
+
             closeAgentSelectModal();
             createTerminal(selectedAgentType, role);
             saveState();
-            showToast(`${AGENT_CONFIG[selectedAgentType].icon} ${AGENT_CONFIG[selectedAgentType].name} 터미널 시작`, 'success');
+            showToast(`${cfg.icon} ${cfg.name} 터미널 시작`, 'success');
         }
 
         // ========== Folder Modal ==========
@@ -909,7 +925,8 @@ HTML_CONTENT = """
                 this.type = type;
                 this.role = role;
                 // Unique sessionId per terminal - never changes
-                this.sessionId = sessionId || `${type}-${role}-${this.id}`;
+                // Use UUID for CLI session (required by Claude --session-id)
+                this.sessionId = sessionId || generateUUID();
                 this.ws = null;
                 this.term = null;
                 this.fitAddon = null;
@@ -1223,6 +1240,16 @@ HTML_CONTENT = """
             const type = document.getElementById('newAgentType').value;
             const role = document.getElementById('newAgentRole').value;
             const cfg = AGENT_CONFIG[type];
+
+            // 단일 인스턴스 에이전트 중복 체크
+            if (!cfg.multiInstance) {
+                const existing = terminals.find(t => t.type === type);
+                if (existing) {
+                    showToast(`${cfg.icon} ${cfg.name}은(는) 하나만 실행 가능합니다 (독립 세션 미지원)`, 'warning');
+                    return;
+                }
+            }
+
             createTerminal(type, role);
             saveState();
             showToast(`${cfg.icon} ${cfg.name} (${role}) 터미널 추가됨`, 'success');

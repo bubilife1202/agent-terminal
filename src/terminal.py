@@ -25,14 +25,13 @@ except ImportError:
 
 # Agent configurations - easily extensible
 # session_cmd: template for session resume (use {session_id} placeholder)
-# NOTE: Claude's --resume option shows a session picker prompt, so we disable it
-#       Users can manually resume sessions using /resume command in Claude CLI
+# Each terminal gets a unique UUID for independent sessions
 AGENT_CONFIGS = {
     "claude": {
         "name": "Claude",
         "icon": "🔵",
         "command": "claude --dangerously-skip-permissions",
-        "session_cmd": None,  # Disabled: --resume shows interactive prompt
+        "session_cmd": "--session-id {session_id}",  # UUID-based session (auto-create/resume)
         "add_image_cmd": "add {path}",
         "prompt_char": ">",
         "color": "#7aa2f7",
@@ -42,8 +41,8 @@ AGENT_CONFIGS = {
     "gemini": {
         "name": "Gemini",
         "icon": "🟢",
-        "command": "gemini",
-        "session_cmd": None,  # Gemini doesn't support session resume
+        "command": "gemini --yolo",
+        "session_cmd": None,  # No UUID-based session support (only index/latest)
         "add_image_cmd": "add {path}",
         "prompt_char": ">",
         "color": "#9ece6a",
@@ -54,7 +53,7 @@ AGENT_CONFIGS = {
         "name": "Codex",
         "icon": "🟠",
         "command": "codex",
-        "session_cmd": None,
+        "session_cmd": None,  # No UUID-based session support (only picker/last)
         "add_image_cmd": None,
         "prompt_char": ">",
         "color": "#ff9e64",
@@ -65,12 +64,12 @@ AGENT_CONFIGS = {
         "name": "OpenCode",
         "icon": "🟣",
         "command": "opencode",
-        "session_cmd": "--session {session_id}",
-        "add_image_cmd": None,  # Image support unclear
+        "session_cmd": "--session {session_id}",  # UUID-based session support
+        "add_image_cmd": None,
         "prompt_char": ">",
         "color": "#bb9af7",
         "supports_image": False,
-        "description": "OpenCode CLI with oh-my-opencode"
+        "description": "OpenCode CLI"
     },
     "shell": {
         "name": "Shell",

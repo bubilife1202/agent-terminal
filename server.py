@@ -7,7 +7,7 @@ Features:
 3. Inter-Agent Communication Message Bus
 """
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 import os
 import sys
@@ -175,10 +175,15 @@ async def list_files_api(path: str):
 async def restart_server():
     """Restart the server process"""
     import subprocess
+    from src.terminal import cleanup_all_sessions
+
     async def do_restart():
+        # 1. 모든 터미널 세션 정리 (PTY 프로세스 종료)
+        await cleanup_all_sessions()
         await asyncio.sleep(0.5)
+
+        # 2. 새 서버 시작 후 현재 프로세스 종료
         if os.name == 'nt':  # Windows
-            # Start new process in new console, then exit current
             subprocess.Popen(
                 [sys.executable] + sys.argv,
                 creationflags=subprocess.CREATE_NEW_CONSOLE
@@ -186,6 +191,7 @@ async def restart_server():
             os._exit(0)
         else:  # Unix
             os.execv(sys.executable, [sys.executable] + sys.argv)
+
     asyncio.create_task(do_restart())
     return JSONResponse({"status": "restarting"})
 

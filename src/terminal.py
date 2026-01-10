@@ -369,6 +369,19 @@ class TerminalSession:
 terminal_sessions: dict[str, TerminalSession] = {}
 
 
+async def cleanup_all_sessions():
+    """Stop all terminal sessions before server shutdown"""
+    print(f"[Terminal] Cleaning up {len(terminal_sessions)} sessions...")
+    for session_id, session in list(terminal_sessions.items()):
+        try:
+            await session.stop()
+            print(f"[Terminal] Stopped session: {session_id[:8]}...")
+        except Exception as e:
+            print(f"[Terminal] Error stopping {session_id[:8]}: {e}")
+    terminal_sessions.clear()
+    print("[Terminal] All sessions cleaned up")
+
+
 async def handle_terminal_websocket(
     websocket: WebSocket,
     session_id: str,

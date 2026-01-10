@@ -7,7 +7,7 @@ Features:
 3. Inter-Agent Communication Message Bus
 """
 
-__version__ = "1.0.3"
+__version__ = "1.0.4"
 
 import os
 import sys
@@ -174,9 +174,18 @@ async def list_files_api(path: str):
 @app.post("/api/restart")
 async def restart_server():
     """Restart the server process"""
+    import subprocess
     async def do_restart():
         await asyncio.sleep(0.5)
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        if os.name == 'nt':  # Windows
+            # Start new process in new console, then exit current
+            subprocess.Popen(
+                [sys.executable] + sys.argv,
+                creationflags=subprocess.CREATE_NEW_CONSOLE
+            )
+            os._exit(0)
+        else:  # Unix
+            os.execv(sys.executable, [sys.executable] + sys.argv)
     asyncio.create_task(do_restart())
     return JSONResponse({"status": "restarting"})
 

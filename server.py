@@ -7,7 +7,7 @@ Features:
 3. Inter-Agent Communication Message Bus
 """
 
-__version__ = "1.1.2"
+__version__ = "1.1.3"
 
 import os
 import sys
@@ -1200,16 +1200,21 @@ HTML_CONTENT = """
                     return true;
                 });
 
-                // Resize observer
+                // Resize observer with debounce
+                let resizeTimeout = null;
                 new ResizeObserver(() => {
                     this.fitAddon?.fit();
-                    if (this.ws?.readyState === WebSocket.OPEN && this.term) {
-                        this.ws.send(JSON.stringify({
-                            type: 'resize',
-                            rows: this.term.rows,
-                            cols: this.term.cols
-                        }));
-                    }
+                    // Debounce resize events to prevent duplicate Claude UI renders
+                    if (resizeTimeout) clearTimeout(resizeTimeout);
+                    resizeTimeout = setTimeout(() => {
+                        if (this.ws?.readyState === WebSocket.OPEN && this.term) {
+                            this.ws.send(JSON.stringify({
+                                type: 'resize',
+                                rows: this.term.rows,
+                                cols: this.term.cols
+                            }));
+                        }
+                    }, 200);
                 }).observe(container);
 
                 if (workDir) this.connect();
@@ -1280,16 +1285,7 @@ HTML_CONTENT = """
                         }
                     }, 5000);
 
-                    // Send initial resize
-                    setTimeout(() => {
-                        if (this.ws?.readyState === WebSocket.OPEN && this.term) {
-                            this.ws.send(JSON.stringify({
-                                type: 'resize',
-                                rows: this.term.rows,
-                                cols: this.term.cols
-                            }));
-                        }
-                    }, 100);
+                    // Initial resize handled by ResizeObserver with debounce
                 };
 
                 this.ws.onmessage = (e) => {

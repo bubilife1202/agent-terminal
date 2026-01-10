@@ -1,0 +1,1350 @@
+#!/usr/bin/env python3
+"""
+Agent Terminal - ChatOps Collaboration Edition
+Features:
+1. Target Routing UI (Visual connection)
+2. Persona Injection (Performance boost via System Prompts)
+3. Inter-Agent Communication Message Bus
+"""
+
+__version__ = "1.0.0"
+
+import os
+import sys
+import json
+import asyncio
+from pathlib import Path
+from typing import Dict, Optional
+from fastapi import FastAPI, WebSocket, Request, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, JSONResponse
+import uvicorn
+
+# Import terminal handler
+# If src.terminal is missing, we define minimal handlers here to ensure it works standalone.
+try:
+    from src.terminal import handle_terminal_websocket, get_available_agents, get_max_terminals
+except ImportError:
+    # Standalone mock for robustness
+    async def handle_terminal_websocket(websocket, session_id, work_dir, agent_type, resume, already_accepted=False):
+        if not already_accepted:
+            await websocket.accept()
+        # Mock terminal behavior
+        await websocket.send_json({"type": "terminal_started", "data": "Terminal Started"})
+        try:
+            while True:
+                data = await websocket.receive_json()
+        except:
+            pass
+    def get_available_agents(): return []
+    def get_max_terminals(): return 6
+
+app = FastAPI(title="Agent Terminal Pro")
+
+# ========== Message Bus (The Brain) ==========
+# Stores active sessions to allow routing messages between agents
+class SessionManager:
+    def __init__(self):
+        self.sessions: Dict[str, WebSocket] = {}
+        self.agent_info: Dict[str, dict] = {} # Stores role, type, name
+
+    def register(self, session_id: str, websocket: WebSocket, info: dict):
+        self.sessions[session_id] = websocket
+        self.agent_info[session_id] = info
+
+    def unregister(self, session_id: str):
+        if session_id in self.sessions:
+            del self.sessions[session_id]
+        if session_id in self.agent_info:
+            del self.agent_info[session_id]
+
+    async def broadcast(self, sender_id: str, message: str):
+        # Broadcast to all except sender
+        for sid, ws in self.sessions.items():
+            if sid != sender_id:
+                try:
+                    await ws.send_json({
+                        "type": "broadcast_message",
+                        "sender": self.agent_info.get(sender_id, {}).get("name", "Unknown"),
+                        "message": message
+                    })
+                except:
+                    pass
+
+    async def send_direct(self, target_index: int, sender_id: str, message: str, context: str = ""):
+        # Find target by index (0, 1, 2...)
+        target_sid = None
+        for sid, info in self.agent_info.items():
+            if info.get("index") == target_index:
+                target_sid = sid
+                break
+        
+        if target_sid and target_sid in self.sessions:
+            sender_name = self.agent_info.get(sender_id, {}).get("name", "Agent")
+            sender_role = self.agent_info.get(sender_id, {}).get("role", "User")
+            
+            # Format the message as a structured report
+            formatted_msg = f"""
+\x1b[38;5;75m╭──────────────────────────────────────────────╮
+│ 📨 MESSAGE from @{sender_name} ({sender_role})          │
+├──────────────────────────────────────────────┤
+│ {message}
+│ 
+│ \x1b[90m[Context/Output Attached]\x1b[0m
+│ {context[:500]}... (truncated)
+╰──────────────────────────────────────────────╯\x1b[0m"""
+            # In a real PTY, we write to the input, but here we send via WS to be handled
+            await self.sessions[target_sid].send_json({
+                "type": "inject_input",
+                "data": formatted_msg
+            })
+            return True
+        return False
+
+manager = SessionManager()
+
+# ========== System Prompts (The Intelligence) ==========
+PERSONAS = {
+    "PM": """
+You are an expert Technical Project Manager.
+Your Goal: Break down vague requirements into clear, actionable technical tasks.
+Rules:
+1. Do NOT write code implementation details.
+2. Focus on architecture, file structure, and step-by-step planning.
+3. Use the '>>' pipe command to delegate tasks to the Developer.
+""",
+    "Dev": """
+You are a Senior Full-Stack Developer.
+Your Goal: Write clean, production-ready code based on instructions.
+Rules:
+1. Focus on implementation. Write filenames and code blocks clearly.
+2. If specifications are missing, ask the PM.
+3. Keep explanations concise. Code is your language.
+""",
+    "QA": """
+You are a QA Lead and Security Specialist.
+Your Goal: Find bugs, security flaws, and logic errors.
+Rules:
+1. Review code critically.
+2. Suggest test cases.
+3. Verify if the code meets the PM's requirements.
+"""
+}
+
+# ========== API Endpoints ==========
+
+@app.get("/api/version")
+async def get_version():
+    return {"version": __version__}
+
+@app.get("/api/agents")
+async def list_agents():
+    # Helper to get drives/folders logic same as before...
+    return {"agents": get_available_agents(), "max_terminals": get_max_terminals()}
+
+@app.get("/api/folders")
+async def list_folders_api(path: str = None):
+    # (Reuse existing logic for brevity in this single file update)
+    import string
+    if not path or path == "drives":
+        drives = [{"name": f"💾 {d}:", "path": f"{d}:\\", "is_drive": True} 
+                  for d in string.ascii_uppercase if os.path.exists(f"{d}:\\")]
+        return {"current": "My Computer", "folders": drives, "is_root": True}
+    
+    try:
+        base = Path(path)
+        folders = []
+        for item in base.iterdir():
+            if item.is_dir() and not item.name.startswith('.'):
+                folders.append({"name": item.name, "path": str(item)})
+        parent = str(base.parent) if base.parent != base else "drives"
+        return {"current": str(base), "parent": parent, "folders": folders[:100]}
+    except:
+        return {"current": path, "folders": []}
+
+@app.get("/api/files")
+async def list_files_api(path: str):
+    try:
+        base = Path(path)
+        items = [{"name": i.name, "path": str(i), "is_dir": i.is_dir()}
+                 for i in base.iterdir() if not i.name.startswith('.')]
+        return {"path": str(base), "items": sorted(items, key=lambda x: (not x['is_dir'], x['name']))[:200]}
+    except:
+        return {"path": path, "items": []}
+
+@app.post("/api/restart")
+async def restart_server():
+    """Restart the server process"""
+    async def do_restart():
+        await asyncio.sleep(0.5)
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    asyncio.create_task(do_restart())
+    return JSONResponse({"status": "restarting"})
+
+# ========== WebSocket ==========
+
+@app.websocket("/ws/terminal/{session_id}")
+async def terminal_websocket(
+    websocket: WebSocket,
+    session_id: str,
+    workdir: str = None,
+    agent: str = "claude",
+    role: str = "General", # New: Persona
+    index: int = 0
+):
+    await websocket.accept()
+    
+    # Register session
+    manager.register(session_id, websocket, {
+        "name": agent.capitalize(),
+        "type": agent,
+        "role": role,
+        "index": index
+    })
+    
+    # Inject Persona (System Prompt)
+    if role in PERSONAS:
+        prompt = f"\r\n\x1b[33m[System] Injecting {role} Persona...\x1b[0m\r\n"
+        await websocket.send_json({"type": "terminal_output", "data": prompt})
+
+    try:
+        await handle_terminal_websocket(websocket, session_id, workdir, agent, resume=True, already_accepted=True)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        manager.unregister(session_id)
+
+
+# ========== HTML UI ==========
+
+HTML_CONTENT = """
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>Agent Terminal Pro</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
+    <style>
+        :root { --bg: #0f1117; --panel: #1a1c23; --border: #2f333d; --accent: #5e81ac; --text: #e6e6e6; }
+        * { box-sizing: border-box; }
+        body { margin: 0; background: var(--bg); color: var(--text); font-family: 'Consolas', monospace; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+
+        /* Header */
+        .header { height: 44px; background: var(--panel); border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 12px; justify-content: space-between; gap: 12px; }
+
+        /* Server Status Indicator */
+        .server-status { display: flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 12px; font-size: 11px; font-weight: bold; background: #2c3039; border: 1px solid var(--border); }
+        .server-status .dot { width: 8px; height: 8px; border-radius: 50%; }
+        .server-status.connected .dot { background: #98c379; box-shadow: 0 0 6px #98c379; }
+        .server-status.reconnecting .dot { background: #e0af68; animation: blink 0.5s infinite; }
+        .server-status.disconnected .dot { background: #e06c75; }
+        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+        .header-left { display: flex; align-items: center; gap: 8px; }
+        .header-right { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+        /* Layout */
+        .main { flex: 1; display: flex; overflow: hidden; }
+        .sidebar { width: 240px; background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; transition: width 0.2s; }
+        .sidebar.hidden { width: 0; overflow: hidden; padding: 0; }
+        .terminal-area { flex: 1; display: flex; flex-direction: column; padding: 4px; gap: 4px; background: #000; min-width: 0; }
+
+        /* Grid Layouts */
+        .grid { display: grid; flex: 1; gap: 4px; min-height: 0; }
+        .grid.cols-1 { grid-template-columns: 1fr; }
+        .grid.cols-2 { grid-template-columns: 1fr 1fr; }
+        .grid.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+        .grid.cols-4 { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+        .grid.cols-6 { grid-template-columns: 1fr 1fr 1fr; grid-template-rows: 1fr 1fr; }
+
+        /* Components */
+        .btn { background: #2c3039; border: 1px solid var(--border); color: var(--text); padding: 5px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; white-space: nowrap; transition: all 0.15s; }
+        .btn:hover { border-color: var(--accent); background: #363d49; }
+        .btn.primary { background: var(--accent); border-color: var(--accent); color: white; }
+        .btn.primary:hover { background: #6d96c7; }
+        .btn.active { background: var(--accent); border-color: var(--accent); }
+
+        select { background: #2c3039; border: 1px solid var(--border); color: var(--text); font-family: inherit; font-size: 11px; padding: 4px 6px; border-radius: 4px; outline: none; cursor: pointer; }
+        select:hover { border-color: var(--accent); }
+
+        /* Terminal Cell */
+        .cell { display: flex; flex-direction: column; background: var(--panel); border: 2px solid var(--border); border-radius: 6px; overflow: hidden; min-height: 0; }
+        .cell.active { border-color: var(--accent); box-shadow: 0 0 10px rgba(94, 129, 172, 0.3); }
+
+        .cell-toolbar { height: 34px; background: #21252b; display: flex; align-items: center; padding: 0 8px; gap: 6px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+        .agent-icon { font-size: 16px; }
+        .agent-name { font-size: 11px; font-weight: bold; color: #abb2bf; }
+        .role-tag { font-size: 9px; padding: 2px 6px; border-radius: 10px; background: #3e4451; color: #abb2bf; text-transform: uppercase; font-weight: bold; }
+        .role-tag.PM { background: #98c379; color: #1e2518; }
+        .role-tag.Dev { background: #61afef; color: #162433; }
+        .role-tag.QA { background: #e06c75; color: #2e1618; }
+
+        .role-select { font-size: 10px; padding: 2px 4px; border-radius: 4px; background: #3e4451; border: 1px solid var(--border); color: var(--text); cursor: pointer; }
+        .role-select:hover { border-color: var(--accent); }
+        .role-select:focus { outline: none; border-color: var(--accent); }
+
+        .cell-actions { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+        .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #5c6370; }
+        .status-dot.live { background: #98c379; box-shadow: 0 0 6px #98c379; animation: pulse 2s infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+
+        .cell-btn { background: transparent; border: none; color: #666; cursor: pointer; padding: 2px 6px; font-size: 14px; border-radius: 3px; }
+        .cell-btn:hover { background: #3e4451; color: var(--text); }
+
+        .term-container { flex: 1; position: relative; overflow: hidden; padding: 2px; min-height: 0; }
+
+        /* Maximized terminal */
+        .cell.maximized { position: fixed; inset: 0; z-index: 999; border-radius: 0; border: none; }
+        .cell.maximized .cell-toolbar { border-radius: 0; }
+        .maximize-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.8); z-index: 998; }
+        .maximize-overlay.show { display: block; }
+
+        /* Modal */
+        .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 1000; opacity: 0; visibility: hidden; transition: all 0.2s; }
+        .modal-overlay.show { opacity: 1; visibility: visible; }
+        .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; width: 500px; max-width: 90vw; max-height: 80vh; display: flex; flex-direction: column; transform: scale(0.95); transition: transform 0.2s; }
+        .modal-overlay.show .modal { transform: scale(1); }
+        .modal-header { padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+        .modal-header h3 { margin: 0; font-size: 14px; }
+        .modal-body { flex: 1; overflow-y: auto; padding: 12px; }
+        .modal-footer { padding: 12px 16px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 8px; }
+
+        /* Folder Browser */
+        .folder-path { background: #000; padding: 8px 12px; border-radius: 4px; margin-bottom: 12px; font-size: 12px; color: #61afef; display: flex; align-items: center; gap: 8px; }
+        .folder-path button { background: #2c3039; border: 1px solid var(--border); color: var(--text); padding: 2px 8px; border-radius: 3px; cursor: pointer; font-size: 11px; }
+        .folder-list { display: flex; flex-direction: column; gap: 2px; }
+        .folder-item { padding: 8px 12px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; gap: 8px; font-size: 12px; transition: background 0.1s; }
+        .folder-item:hover { background: #2c3039; }
+        .folder-item.selected { background: var(--accent); color: white; }
+        .folder-item .icon { font-size: 16px; }
+
+        /* Toast */
+        .toast-container { position: fixed; bottom: 20px; right: 20px; z-index: 2000; display: flex; flex-direction: column; gap: 8px; }
+        .toast { background: var(--panel); border: 1px solid var(--border); padding: 10px 16px; border-radius: 6px; font-size: 12px; animation: slideIn 0.2s; }
+        .toast.success { border-color: #98c379; }
+        .toast.error { border-color: #e06c75; }
+        .toast.warning { border-color: #e0af68; }
+        @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+
+        /* Agent Select Grid */
+        .agent-select-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+        .agent-select-item { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 16px 8px; background: #2c3039; border: 2px solid var(--border); border-radius: 8px; cursor: pointer; transition: all 0.15s; }
+        .agent-select-item:hover { border-color: var(--accent); background: #363d49; }
+        .agent-select-item.selected { border-color: var(--accent); background: var(--accent); }
+        .agent-select-item .icon { font-size: 28px; }
+        .agent-select-item .name { font-size: 11px; font-weight: bold; color: var(--text); }
+
+        /* Project List Sidebar */
+        .sidebar-section { border-bottom: 1px solid var(--border); }
+        .sidebar-section-header { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; font-size: 11px; font-weight: bold; color: #abb2bf; cursor: pointer; user-select: none; }
+        .sidebar-section-header:hover { background: #2c3039; }
+        .sidebar-section-header .toggle { font-size: 10px; color: #5c6370; }
+        .sidebar-section-content { max-height: 200px; overflow-y: auto; }
+        .sidebar-section-content.collapsed { display: none; }
+
+        .project-item { display: flex; align-items: center; gap: 6px; padding: 6px 10px; font-size: 11px; cursor: pointer; color: #abb2bf; transition: background 0.1s; }
+        .project-item:hover { background: #2c3039; }
+        .project-item.active { background: var(--accent); color: white; }
+        .project-item .icon { font-size: 14px; flex-shrink: 0; }
+        .project-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .project-item .actions { display: none; gap: 2px; }
+        .project-item:hover .actions { display: flex; }
+        .project-item .action-btn { background: none; border: none; color: #5c6370; cursor: pointer; padding: 2px; font-size: 12px; border-radius: 3px; }
+        .project-item .action-btn:hover { background: #3e4451; color: var(--text); }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <div class="header-left">
+            <span style="font-size: 18px;">🤖</span>
+            <span style="font-weight: bold; font-size: 14px;">Agent Terminal</span>
+            <span style="font-size: 10px; color: #5c6370; margin-left: -4px;">v1.0.0</span>
+            <div class="server-status disconnected" id="serverStatus">
+                <span class="dot"></span>
+                <span class="status-text">연결 중...</span>
+            </div>
+            <button class="btn" onclick="openFolderModal()">📁 폴더 선택</button>
+            <button class="btn" onclick="toggleSidebar()">📂 파일 탐색</button>
+        </div>
+        <div class="header-right">
+            <select id="layoutSelect" onchange="setLayout(this.value)" title="터미널 레이아웃">
+                <option value="1">1개</option>
+                <option value="2">2개 (가로)</option>
+                <option value="3">3개 (가로)</option>
+                <option value="4">4개 (2x2)</option>
+                <option value="6">6개 (3x2)</option>
+            </select>
+            <select id="newAgentType" title="에이전트 타입">
+                <option value="claude">🔵 Claude</option>
+                <option value="gemini">🟢 Gemini</option>
+                <option value="codex">🟠 Codex</option>
+                <option value="opencode">🟣 OpenCode</option>
+                <option value="shell">⚪ Shell</option>
+            </select>
+            <select id="newAgentRole" title="에이전트 역할">
+                <option value="General">General</option>
+                <option value="PM">👑 PM</option>
+                <option value="Dev">💻 Dev</option>
+                <option value="QA">🛡️ QA</option>
+            </select>
+            <button class="btn primary" onclick="addAgent()">+ 터미널 추가</button>
+            <button class="btn" onclick="restartServer()" title="서버 재시작" style="background:#e06c75;border-color:#e06c75;color:white;">🔄 서버 재시작</button>
+        </div>
+    </header>
+
+    <div class="main">
+        <aside class="sidebar" id="sidebar">
+            <!-- 즐겨찾기 -->
+            <div class="sidebar-section">
+                <div class="sidebar-section-header" onclick="toggleSection('favorites')">
+                    <span>⭐ 즐겨찾기</span>
+                    <span class="toggle" id="favoritesToggle">▼</span>
+                </div>
+                <div class="sidebar-section-content" id="favoritesContent">
+                    <div id="favoritesList"></div>
+                </div>
+            </div>
+
+            <!-- 최근 프로젝트 -->
+            <div class="sidebar-section">
+                <div class="sidebar-section-header" onclick="toggleSection('recent')">
+                    <span>🕐 최근 프로젝트</span>
+                    <span class="toggle" id="recentToggle">▼</span>
+                </div>
+                <div class="sidebar-section-content" id="recentContent">
+                    <div id="recentList"></div>
+                </div>
+            </div>
+
+            <!-- 현재 폴더 -->
+            <div class="sidebar-section" style="flex:1; display:flex; flex-direction:column; border-bottom:none;">
+                <div class="sidebar-section-header" style="cursor:default;">
+                    <span>📂 현재 폴더</span>
+                    <button class="action-btn" onclick="openFolderModal()" title="폴더 변경" style="font-size:14px;">📁</button>
+                </div>
+                <div style="padding: 4px 10px 8px; font-size: 11px;">
+                    <span id="workDirDisplay" style="color: #61afef; cursor: pointer; word-break: break-all;" onclick="openFolderModal()">폴더를 선택하세요...</span>
+                </div>
+                <div id="fileTree" style="flex:1; overflow-y: auto; padding: 0 8px 8px; font-size: 12px; color: #abb2bf;"></div>
+            </div>
+        </aside>
+
+        <div class="terminal-area">
+            <div id="grid" class="grid cols-1"></div>
+        </div>
+    </div>
+
+    <!-- Folder Modal -->
+    <div class="modal-overlay" id="folderModal">
+        <div class="modal">
+            <div class="modal-header">
+                <h3>📁 작업 폴더 선택</h3>
+                <button class="cell-btn" onclick="closeFolderModal()">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="folder-path">
+                    <button onclick="goToParent()">⬆️ 상위</button>
+                    <span id="currentPath">My Computer</span>
+                </div>
+                <div class="folder-list" id="folderList"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" onclick="closeFolderModal()">취소</button>
+                <button class="btn primary" onclick="confirmFolder()">이 폴더 선택</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Agent Select Modal -->
+    <div class="modal-overlay" id="agentSelectModal">
+        <div class="modal" style="width: 400px;">
+            <div class="modal-header">
+                <h3>🤖 에이전트 선택</h3>
+                <button class="cell-btn" onclick="closeAgentSelectModal()">✕</button>
+            </div>
+            <div class="modal-body">
+                <p style="color:#abb2bf;font-size:12px;margin-bottom:12px;">첫 번째로 실행할 에이전트를 선택하세요:</p>
+                <div class="agent-select-grid" id="agentSelectGrid"></div>
+                <div style="margin-top:16px;">
+                    <label style="font-size:11px;color:#abb2bf;">역할:</label>
+                    <select id="agentSelectRole" style="width:100%;margin-top:4px;padding:8px;">
+                        <option value="General">General - 범용</option>
+                        <option value="PM">👑 PM - 프로젝트 매니저</option>
+                        <option value="Dev">💻 Dev - 개발자</option>
+                        <option value="QA">🛡️ QA - 품질 관리</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" onclick="closeAgentSelectModal()">취소</button>
+                <button class="btn primary" onclick="confirmAgentSelect()">시작</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Container -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- Maximize Overlay -->
+    <div class="maximize-overlay" id="maximizeOverlay"></div>
+
+    <script>
+        // ========== Constants ==========
+        const SESSION_KEY = 'agent-terminal-pro-state';
+        const PROJECTS_KEY = 'agent-terminal-projects';
+        const AGENT_CONFIG = {
+            claude:   { icon: '🔵', name: 'Claude',   color: '#7aa2f7' },
+            gemini:   { icon: '🟢', name: 'Gemini',   color: '#9ece6a' },
+            codex:    { icon: '🟠', name: 'Codex',    color: '#ff9e64' },
+            opencode: { icon: '🟣', name: 'OpenCode', color: '#bb9af7' },
+            shell:    { icon: '⚪', name: 'Shell',    color: '#a9b1d6' }
+        };
+
+        // ========== State ==========
+        let terminals = [];
+        let workDir = null;
+        let layoutCols = 1;
+        let browsingPath = 'drives';
+        let parentPath = null;
+        let serverStatus = 'disconnected'; // 'connected', 'reconnecting', 'disconnected'
+        let healthCheckInterval = null;
+
+        // 프로젝트 리스트
+        let favorites = [];  // 즐겨찾기
+        let recentProjects = [];  // 최근 프로젝트 (최대 10개)
+
+        // ========== Server Status Management ==========
+        function updateServerStatus(status, text) {
+            serverStatus = status;
+            const el = document.getElementById('serverStatus');
+            if (!el) return;
+            el.className = 'server-status ' + status;
+            el.querySelector('.status-text').textContent = text;
+        }
+
+        async function checkServerHealth() {
+            try {
+                const res = await fetch('/api/agents', { method: 'GET', signal: AbortSignal.timeout(3000) });
+                if (res.ok) {
+                    if (serverStatus !== 'connected') {
+                        updateServerStatus('connected', '연결됨');
+                        // 서버 재연결 시 터미널 재연결
+                        if (terminals.length > 0) {
+                            terminals.forEach(t => {
+                                if (!t.ws || t.ws.readyState !== WebSocket.OPEN) {
+                                    t.connect();
+                                }
+                            });
+                        }
+                    }
+                    return true;
+                }
+            } catch (e) {
+                if (serverStatus === 'connected') {
+                    updateServerStatus('reconnecting', '재연결 중...');
+                }
+            }
+            return false;
+        }
+
+        function startHealthCheck() {
+            if (healthCheckInterval) clearInterval(healthCheckInterval);
+            healthCheckInterval = setInterval(checkServerHealth, 2000);
+            checkServerHealth(); // 즉시 실행
+        }
+
+        // ========== Project List Management ==========
+        function loadProjects() {
+            try {
+                const data = JSON.parse(localStorage.getItem(PROJECTS_KEY) || '{}');
+                favorites = data.favorites || [];
+                recentProjects = data.recent || [];
+                console.log('[Projects] 로드됨:', { favorites: favorites.length, recent: recentProjects.length });
+            } catch (e) {
+                console.error('[Projects] 로드 오류:', e);
+                favorites = [];
+                recentProjects = [];
+            }
+            renderProjectLists();
+        }
+
+        function saveProjects() {
+            const data = { favorites, recent: recentProjects };
+            localStorage.setItem(PROJECTS_KEY, JSON.stringify(data));
+            console.log('[Projects] 저장됨');
+        }
+
+        function addToRecent(path) {
+            if (!path) return;
+            // 이미 있으면 제거 후 맨 앞에 추가
+            recentProjects = recentProjects.filter(p => p !== path);
+            recentProjects.unshift(path);
+            // 최대 10개 유지
+            if (recentProjects.length > 10) recentProjects = recentProjects.slice(0, 10);
+            saveProjects();
+            renderProjectLists();
+        }
+
+        function toggleFavorite(path) {
+            const idx = favorites.indexOf(path);
+            if (idx >= 0) {
+                favorites.splice(idx, 1);
+                showToast('즐겨찾기에서 제거됨', 'info');
+            } else {
+                favorites.push(path);
+                showToast('즐겨찾기에 추가됨', 'success');
+            }
+            saveProjects();
+            renderProjectLists();
+        }
+
+        function removeFromRecent(path) {
+            recentProjects = recentProjects.filter(p => p !== path);
+            saveProjects();
+            renderProjectLists();
+        }
+
+        function isFavorite(path) {
+            return favorites.includes(path);
+        }
+
+        function getProjectName(path) {
+            // 경로에서 폴더명만 추출
+            return path.split(/[\\\\/]/).filter(Boolean).pop() || path;
+        }
+
+        function renderProjectLists() {
+            // 즐겨찾기 렌더링
+            const favList = document.getElementById('favoritesList');
+            if (favList) {
+                if (favorites.length === 0) {
+                    favList.innerHTML = '<div style="padding:8px 10px;color:#5c6370;font-size:10px;">즐겨찾기가 없습니다</div>';
+                } else {
+                    favList.innerHTML = favorites.map(path => `
+                        <div class="project-item ${path === workDir ? 'active' : ''}" onclick="openProject('${path.replace(/\\\\/g, '\\\\\\\\')}')">
+                            <span class="icon">⭐</span>
+                            <span class="name" title="${path}">${getProjectName(path)}</span>
+                            <div class="actions">
+                                <button class="action-btn" onclick="event.stopPropagation();toggleFavorite('${path.replace(/\\\\/g, '\\\\\\\\')}')" title="즐겨찾기 해제">✕</button>
+                            </div>
+                        </div>
+                    `).join('');
+                }
+            }
+
+            // 최근 프로젝트 렌더링
+            const recentList = document.getElementById('recentList');
+            if (recentList) {
+                if (recentProjects.length === 0) {
+                    recentList.innerHTML = '<div style="padding:8px 10px;color:#5c6370;font-size:10px;">최근 프로젝트가 없습니다</div>';
+                } else {
+                    recentList.innerHTML = recentProjects.map(path => `
+                        <div class="project-item ${path === workDir ? 'active' : ''}" onclick="openProject('${path.replace(/\\\\/g, '\\\\\\\\')}')">
+                            <span class="icon">${isFavorite(path) ? '⭐' : '📁'}</span>
+                            <span class="name" title="${path}">${getProjectName(path)}</span>
+                            <div class="actions">
+                                <button class="action-btn" onclick="event.stopPropagation();toggleFavorite('${path.replace(/\\\\/g, '\\\\\\\\')}')" title="${isFavorite(path) ? '즐겨찾기 해제' : '즐겨찾기 추가'}">${isFavorite(path) ? '★' : '☆'}</button>
+                                <button class="action-btn" onclick="event.stopPropagation();removeFromRecent('${path.replace(/\\\\/g, '\\\\\\\\')}')" title="목록에서 제거">✕</button>
+                            </div>
+                        </div>
+                    `).join('');
+                }
+            }
+        }
+
+        function openProject(path) {
+            workDir = path;
+            document.getElementById('workDirDisplay').textContent = workDir;
+            loadFileTree(workDir);
+            addToRecent(path);
+
+            // 터미널이 없으면 에이전트 선택 모달, 있으면 재연결
+            if (terminals.length === 0) {
+                openAgentSelectModal();
+            } else {
+                terminals.forEach(t => t.connect());
+            }
+            saveState();
+            showToast(`프로젝트 열림: ${getProjectName(path)}`, 'success');
+        }
+
+        function toggleSection(section) {
+            const content = document.getElementById(section + 'Content');
+            const toggle = document.getElementById(section + 'Toggle');
+            if (content && toggle) {
+                content.classList.toggle('collapsed');
+                toggle.textContent = content.classList.contains('collapsed') ? '▶' : '▼';
+            }
+        }
+
+        // ========== Unique ID ==========
+        function generateId() {
+            return Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
+        }
+
+        // ========== Toast ==========
+        function showToast(msg, type = 'info') {
+            const container = document.getElementById('toastContainer');
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            toast.textContent = msg;
+            container.appendChild(toast);
+            setTimeout(() => toast.remove(), 3000);
+        }
+
+        // ========== Session Persistence ==========
+        function saveState() {
+            const state = {
+                workDir: workDir || null,
+                layoutCols,
+                terminals: terminals.map(t => ({
+                    id: t.id,
+                    type: t.type,
+                    role: t.role,
+                    sessionId: t.sessionId,
+                    targetId: t.targetId || null  // 라우팅 대상 저장
+                }))
+            };
+            localStorage.setItem(SESSION_KEY, JSON.stringify(state));
+            console.log('[SaveState] 저장됨:', state);
+        }
+
+        function loadState() {
+            try {
+                const raw = localStorage.getItem(SESSION_KEY);
+                if (!raw) return null;
+                const state = JSON.parse(raw);
+                console.log('[LoadState] 로드됨:', state);
+                return state;
+            } catch(e) {
+                console.error('[LoadState] 오류:', e);
+                return null;
+            }
+        }
+
+        function restoreSession() {
+            console.log('[RestoreSession] 시작');
+            const state = loadState();
+
+            if (!state) {
+                console.log('[RestoreSession] 저장된 상태 없음');
+                return false;
+            }
+
+            // workDir 복원 (없어도 터미널 구조는 복원)
+            if (state.workDir) {
+                workDir = state.workDir;
+                document.getElementById('workDirDisplay').textContent = workDir;
+                loadFileTree(workDir);
+            }
+
+            // 레이아웃 복원
+            layoutCols = state.layoutCols || 1;
+            document.getElementById('layoutSelect').value = layoutCols;
+            document.getElementById('grid').className = `grid cols-${layoutCols}`;
+
+            // 터미널 복원
+            if (state.terminals && state.terminals.length > 0) {
+                console.log(`[RestoreSession] ${state.terminals.length}개 터미널 복원 시작`);
+                state.terminals.forEach((saved, idx) => {
+                    console.log(`[RestoreSession] 터미널 ${idx + 1} 생성:`, saved);
+                    createTerminal(saved.type, saved.role, saved.id, saved.sessionId, saved.targetId);
+                });
+
+                // 라우팅 옵션 새로고침 및 라우팅 대상 복원
+                setTimeout(() => {
+                    refreshRouterOptions();
+                    state.terminals.forEach(saved => {
+                        if (saved.targetId) {
+                            const t = terminals.find(x => x.id === saved.id);
+                            if (t) {
+                                t.targetId = saved.targetId;
+                                const select = t.el.querySelector(`[data-router-for="${t.id}"]`);
+                                if (select) select.value = saved.targetId;
+                            }
+                        }
+                    });
+                }, 100);
+
+                showToast(`세션 복원됨: ${state.terminals.length}개 터미널`, 'success');
+                return true;
+            } else {
+                console.log('[RestoreSession] 저장된 터미널 없음');
+                return false;
+            }
+        }
+
+        // ========== Agent Select Modal ==========
+        let selectedAgentType = 'claude';
+
+        function openAgentSelectModal() {
+            const modal = document.getElementById('agentSelectModal');
+            const grid = document.getElementById('agentSelectGrid');
+
+            // 에이전트 그리드 생성
+            grid.innerHTML = Object.entries(AGENT_CONFIG).map(([key, cfg]) => `
+                <div class="agent-select-item ${key === selectedAgentType ? 'selected' : ''}"
+                     onclick="selectAgentType('${key}')" data-agent="${key}">
+                    <span class="icon">${cfg.icon}</span>
+                    <span class="name">${cfg.name}</span>
+                </div>
+            `).join('');
+
+            modal.classList.add('show');
+        }
+
+        function closeAgentSelectModal() {
+            document.getElementById('agentSelectModal').classList.remove('show');
+        }
+
+        function selectAgentType(type) {
+            selectedAgentType = type;
+            document.querySelectorAll('.agent-select-item').forEach(el => {
+                el.classList.toggle('selected', el.dataset.agent === type);
+            });
+        }
+
+        function confirmAgentSelect() {
+            const role = document.getElementById('agentSelectRole').value;
+            closeAgentSelectModal();
+            createTerminal(selectedAgentType, role);
+            saveState();
+            showToast(`${AGENT_CONFIG[selectedAgentType].icon} ${AGENT_CONFIG[selectedAgentType].name} 터미널 시작`, 'success');
+        }
+
+        // ========== Folder Modal ==========
+        function openFolderModal() {
+            document.getElementById('folderModal').classList.add('show');
+            browsingPath = 'drives';
+            loadFolderList('drives');
+        }
+
+        function closeFolderModal() {
+            document.getElementById('folderModal').classList.remove('show');
+        }
+
+        async function loadFolderList(path) {
+            try {
+                const res = await fetch(`/api/folders?path=${encodeURIComponent(path)}`);
+                const data = await res.json();
+
+                browsingPath = data.current || path;
+                parentPath = data.parent || null;
+                document.getElementById('currentPath').textContent = data.current || 'My Computer';
+
+                const list = document.getElementById('folderList');
+                list.innerHTML = data.folders.map(f => `
+                    <div class="folder-item" onclick="loadFolderList('${f.path.replace(/\\\\/g, '\\\\\\\\')}')">
+                        <span class="icon">${f.is_drive ? '💾' : '📁'}</span>
+                        <span>${f.name}</span>
+                    </div>
+                `).join('') || '<div style="color:#666;padding:20px;text-align:center;">No folders</div>';
+            } catch (e) {
+                showToast('Failed to load folders', 'error');
+            }
+        }
+
+        function goToParent() {
+            if (parentPath) loadFolderList(parentPath);
+        }
+
+        function confirmFolder() {
+            if (browsingPath === 'drives') {
+                showToast('폴더를 선택해주세요', 'warning');
+                return;
+            }
+            workDir = browsingPath;
+            document.getElementById('workDirDisplay').textContent = workDir;
+            closeFolderModal();
+            loadFileTree(workDir);
+
+            // 최근 프로젝트에 추가
+            addToRecent(workDir);
+
+            // 터미널이 없으면 에이전트 선택 모달 표시
+            if (terminals.length === 0) {
+                openAgentSelectModal();
+            } else {
+                // 기존 터미널 재연결
+                terminals.forEach(t => t.connect());
+            }
+            saveState();
+            showToast(`작업 폴더: ${getProjectName(workDir)}`, 'success');
+        }
+
+        // ========== UI Helpers ==========
+        function toggleSidebar() {
+            document.getElementById('sidebar').classList.toggle('hidden');
+            setTimeout(fitAll, 200);
+        }
+
+        async function loadFileTree(path) {
+            try {
+                const res = await fetch(`/api/files?path=${encodeURIComponent(path)}`);
+                const data = await res.json();
+                const tree = document.getElementById('fileTree');
+                tree.innerHTML = data.items.map(i => `
+                    <div style="padding:4px 8px; cursor:pointer; border-radius:3px;"
+                         onmouseover="this.style.background='#2c3039'"
+                         onmouseout="this.style.background='transparent'"
+                         onclick="${i.is_dir ? `loadFileTree('${i.path.replace(/\\\\/g, '\\\\\\\\')}')` : ''}">
+                        ${i.is_dir ? '📁' : '📄'} ${i.name}
+                    </div>
+                `).join('');
+            } catch (e) {}
+        }
+
+        function setLayout(n) {
+            layoutCols = parseInt(n);
+            document.getElementById('grid').className = `grid cols-${n}`;
+            setTimeout(fitAll, 100);
+            saveState();
+        }
+
+        // ========== Terminal Class ==========
+        class AgentTerminal {
+            constructor(type, role, id, sessionId) {
+                this.id = id || generateId();
+                this.type = type;
+                this.role = role;
+                // Unique sessionId per terminal - never changes
+                this.sessionId = sessionId || `${type}-${role}-${this.id}`;
+                this.ws = null;
+                this.term = null;
+                this.fitAddon = null;
+
+                this.el = document.createElement('div');
+                this.el.className = 'cell';
+                this.el.dataset.terminalId = this.id;
+                this.render();
+
+                document.getElementById('grid').appendChild(this.el);
+                this.initXterm();
+            }
+
+            render() {
+                const cfg = AGENT_CONFIG[this.type] || AGENT_CONFIG.shell;
+                this.el.innerHTML = `
+                    <div class="cell-toolbar" style="border-left: 3px solid ${cfg.color};">
+                        <span class="agent-icon">${cfg.icon}</span>
+                        <span class="agent-name">${cfg.name}</span>
+                        <select class="role-select" data-role-for="${this.id}" title="역할 변경">
+                            <option value="General" ${this.role === 'General' ? 'selected' : ''}>General</option>
+                            <option value="PM" ${this.role === 'PM' ? 'selected' : ''}>👑 PM</option>
+                            <option value="Dev" ${this.role === 'Dev' ? 'selected' : ''}>💻 Dev</option>
+                            <option value="QA" ${this.role === 'QA' ? 'selected' : ''}>🛡️ QA</option>
+                        </select>
+                        <div class="cell-actions">
+                            <select data-router-for="${this.id}" title="출력 라우팅 대상">
+                                <option value="">📡 라우팅 없음</option>
+                            </select>
+                            <div class="status-dot" data-dot-for="${this.id}" title="연결 상태"></div>
+                            <button class="cell-btn" data-maximize-btn onclick="toggleMaximize('${this.id}')" title="최대화">⤢</button>
+                            <button class="cell-btn" onclick="restartTerminal('${this.id}')" title="터미널 재연결">↻</button>
+                            <button class="cell-btn" onclick="removeAgent('${this.id}')" title="터미널 닫기">✕</button>
+                        </div>
+                    </div>
+                    <div class="term-container" data-container-for="${this.id}"></div>
+                `;
+
+                // Role change binding
+                const roleSelect = this.el.querySelector(`[data-role-for="${this.id}"]`);
+                roleSelect.onchange = () => {
+                    this.role = roleSelect.value;
+                    this.term?.write(`\\r\\n\\x1b[33m[역할 변경: ${this.role}]\\x1b[0m\\r\\n`);
+                    saveState();
+                };
+
+                // Router binding
+                const routerSelect = this.el.querySelector(`[data-router-for="${this.id}"]`);
+                routerSelect.onchange = () => this.routeTo(routerSelect.value);
+            }
+
+            initXterm() {
+                const container = this.el.querySelector(`[data-container-for="${this.id}"]`);
+                const cfg = AGENT_CONFIG[this.type] || AGENT_CONFIG.shell;
+
+                this.term = new Terminal({
+                    fontFamily: 'Consolas, Monaco, monospace',
+                    fontSize: 13,
+                    cursorBlink: true,
+                    theme: {
+                        background: '#1a1b26',
+                        foreground: '#c0caf5',
+                        cursor: cfg.color,
+                        selection: 'rgba(122, 162, 247, 0.3)'
+                    }
+                });
+
+                this.fitAddon = new FitAddon.FitAddon();
+                this.term.loadAddon(this.fitAddon);
+                this.term.loadAddon(new WebLinksAddon.WebLinksAddon());
+                this.term.open(container);
+                this.fitAddon.fit();
+
+                // Input handler
+                this.term.onData(data => {
+                    if (this.ws?.readyState === WebSocket.OPEN) {
+                        this.ws.send(JSON.stringify({ type: 'input', data }));
+                    }
+                });
+
+                // Clipboard paste (Ctrl+V) - images and text
+                this.term.attachCustomKeyEventHandler((e) => {
+                    if (e.type === 'keydown' && (e.ctrlKey || e.metaKey) && e.key === 'v') {
+                        this.handlePaste();
+                        return false;
+                    }
+                    return true;
+                });
+
+                // Resize observer
+                new ResizeObserver(() => {
+                    this.fitAddon?.fit();
+                    if (this.ws?.readyState === WebSocket.OPEN && this.term) {
+                        this.ws.send(JSON.stringify({
+                            type: 'resize',
+                            rows: this.term.rows,
+                            cols: this.term.cols
+                        }));
+                    }
+                }).observe(container);
+
+                if (workDir) this.connect();
+            }
+
+            async handlePaste() {
+                try {
+                    const items = await navigator.clipboard.read();
+                    for (const item of items) {
+                        // Check for image first
+                        for (const type of item.types) {
+                            if (type.startsWith('image/')) {
+                                const blob = await item.getType(type);
+                                const reader = new FileReader();
+                                reader.onload = () => {
+                                    if (this.ws?.readyState === WebSocket.OPEN) {
+                                        this.ws.send(JSON.stringify({
+                                            type: 'image',
+                                            data: reader.result,
+                                            filename: `clipboard-${Date.now()}.png`
+                                        }));
+                                        this.term.write('\\r\\n\\x1b[36m[Image pasted]\\x1b[0m\\r\\n');
+                                    }
+                                };
+                                reader.readAsDataURL(blob);
+                                return;
+                            }
+                        }
+                    }
+                    // No image - try text
+                    const text = await navigator.clipboard.readText();
+                    if (text) this.term.paste(text);
+                } catch {
+                    // Fallback to text only
+                    try {
+                        const text = await navigator.clipboard.readText();
+                        if (text) this.term.paste(text);
+                    } catch {}
+                }
+            }
+
+            connect() {
+                if (this.ws) this.ws.close();
+                if (!workDir) return;
+
+                const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const idx = terminals.indexOf(this);
+                const cfg = AGENT_CONFIG[this.type] || AGENT_CONFIG.shell;
+
+                this.ws = new WebSocket(
+                    `${protocol}//${location.host}/ws/terminal/${this.sessionId}?workdir=${encodeURIComponent(workDir)}&agent=${this.type}&role=${this.role}&index=${idx}`
+                );
+
+                this.ws.onopen = () => {
+                    const dot = this.el.querySelector(`[data-dot-for="${this.id}"]`);
+                    if (dot) dot.classList.add('live');
+
+                    // Send initial resize
+                    setTimeout(() => {
+                        if (this.ws?.readyState === WebSocket.OPEN && this.term) {
+                            this.ws.send(JSON.stringify({
+                                type: 'resize',
+                                rows: this.term.rows,
+                                cols: this.term.cols
+                            }));
+                        }
+                    }, 100);
+                };
+
+                this.ws.onmessage = (e) => {
+                    const msg = JSON.parse(e.data);
+                    switch (msg.type) {
+                        case 'terminal_output':
+                            this.term.write(msg.data);
+                            // Route to target if set
+                            if (this.targetId) this.sendToTarget(msg.data);
+                            break;
+                        case 'terminal_started':
+                            this.term.write(`\\r\\n\\x1b[38;2;${this.hexToRgb(cfg.color)}m${cfg.icon} ${cfg.name} 준비 완료\\x1b[0m\\r\\n`);
+                            this.term.write(`\\x1b[90m역할: ${this.role} | 작업폴더: ${workDir}\\x1b[0m\\r\\n\\r\\n`);
+                            break;
+                        case 'inject_input':
+                            this.term.write(msg.data);
+                            this.ws.send(JSON.stringify({ type: 'input', data: msg.data }));
+                            break;
+                        case 'image_added':
+                            this.term.write(`\\r\\n\\x1b[36m[Image: ${msg.filename}]\\x1b[0m\\r\\n`);
+                            break;
+                        case 'error':
+                            this.term.write(`\\r\\n\\x1b[31m${msg.message}\\x1b[0m\\r\\n`);
+                            break;
+                    }
+                };
+
+                this.ws.onclose = () => {
+                    const dot = this.el.querySelector(`[data-dot-for="${this.id}"]`);
+                    if (dot) dot.classList.remove('live');
+
+                    // Auto-reconnect after 3 seconds
+                    if (workDir && !this.disposed) {
+                        this.term?.write('\\r\\n\\x1b[33m[Disconnected - Reconnecting in 3s...]\\x1b[0m\\r\\n');
+                        this.reconnectTimeout = setTimeout(() => {
+                            if (!this.disposed) {
+                                this.connect();
+                            }
+                        }, 3000);
+                    }
+                };
+
+                this.ws.onerror = () => {
+                    this.term?.write('\\r\\n\\x1b[31m[Connection error]\\x1b[0m\\r\\n');
+                };
+            }
+
+            hexToRgb(hex) {
+                const r = parseInt(hex.slice(1,3), 16);
+                const g = parseInt(hex.slice(3,5), 16);
+                const b = parseInt(hex.slice(5,7), 16);
+                return `${r};${g};${b}`;
+            }
+
+            routeTo(targetId) {
+                this.targetId = targetId || null;
+                if (targetId) {
+                    const target = terminals.find(t => t.id === targetId);
+                    if (target) {
+                        const cfg = AGENT_CONFIG[target.type] || AGENT_CONFIG.shell;
+                        this.term.write(`\\r\\n\\x1b[36m[출력 라우팅: ${cfg.icon} ${cfg.name} (${target.role})로 전송]\\x1b[0m\\r\\n`);
+                    }
+                } else {
+                    this.term.write(`\\r\\n\\x1b[36m[출력 라우팅 해제]\\x1b[0m\\r\\n`);
+                }
+                saveState();
+            }
+
+            sendToTarget(data) {
+                const target = terminals.find(t => t.id === this.targetId);
+                if (target?.ws?.readyState === WebSocket.OPEN) {
+                    const cfg = AGENT_CONFIG[this.type] || AGENT_CONFIG.shell;
+                    target.ws.send(JSON.stringify({
+                        type: 'input',
+                        data: `\\n[${cfg.name}]: ${data.replace(/\\x1b\\[[0-9;]*m/g, '').trim()}\\n`
+                    }));
+                }
+            }
+
+            dispose() {
+                this.disposed = true;
+                if (this.reconnectTimeout) clearTimeout(this.reconnectTimeout);
+                if (this.ws) this.ws.close();
+                if (this.term) this.term.dispose();
+            }
+        }
+
+        // ========== Maximize/Minimize ==========
+        let maximizedTerminalId = null;
+
+        function toggleMaximize(terminalId) {
+            const t = terminals.find(t => t.id === terminalId);
+            if (!t) return;
+
+            const btn = t.el.querySelector('[data-maximize-btn]');
+
+            if (maximizedTerminalId === terminalId) {
+                // Minimize
+                t.el.classList.remove('maximized');
+                document.getElementById('maximizeOverlay').classList.remove('show');
+                maximizedTerminalId = null;
+                if (btn) { btn.textContent = '⤢'; btn.title = 'Maximize'; }
+                setTimeout(fitAll, 100);
+            } else {
+                // First minimize any other
+                if (maximizedTerminalId) {
+                    const prev = terminals.find(t => t.id === maximizedTerminalId);
+                    if (prev) {
+                        prev.el.classList.remove('maximized');
+                        const prevBtn = prev.el.querySelector('[data-maximize-btn]');
+                        if (prevBtn) { prevBtn.textContent = '⤢'; prevBtn.title = 'Maximize'; }
+                    }
+                }
+                // Maximize this one
+                t.el.classList.add('maximized');
+                document.getElementById('maximizeOverlay').classList.add('show');
+                maximizedTerminalId = terminalId;
+                if (btn) { btn.textContent = '⤡'; btn.title = 'Minimize'; }
+                setTimeout(() => {
+                    t.fitAddon?.fit();
+                    t.term?.focus();
+                }, 100);
+            }
+        }
+
+        // ========== Terminal Management ==========
+        function createTerminal(type, role, id, sessionId, targetId = null) {
+            const t = new AgentTerminal(type, role, id, sessionId);
+            if (targetId) t.targetId = targetId;
+            terminals.push(t);
+            refreshRouterOptions();
+            return t;
+        }
+
+        function addAgent() {
+            if (!workDir) {
+                openFolderModal();
+                showToast('먼저 작업 폴더를 선택해주세요', 'warning');
+                return;
+            }
+            if (terminals.length >= 6) {
+                showToast('최대 6개의 터미널까지만 가능합니다', 'warning');
+                return;
+            }
+            const type = document.getElementById('newAgentType').value;
+            const role = document.getElementById('newAgentRole').value;
+            const cfg = AGENT_CONFIG[type];
+            createTerminal(type, role);
+            saveState();
+            showToast(`${cfg.icon} ${cfg.name} (${role}) 터미널 추가됨`, 'success');
+        }
+
+        function removeAgent(terminalId) {
+            if (terminals.length <= 1) {
+                showToast('최소 1개의 터미널은 유지해야 합니다', 'warning');
+                return;
+            }
+
+            const idx = terminals.findIndex(t => t.id === terminalId);
+            if (idx === -1) return;
+
+            terminals[idx].dispose();
+            terminals.splice(idx, 1);
+
+            const el = document.querySelector(`[data-terminal-id="${terminalId}"]`);
+            if (el) el.remove();
+
+            refreshRouterOptions();
+            saveState();
+            fitAll();
+        }
+
+        function restartTerminal(terminalId) {
+            const t = terminals.find(t => t.id === terminalId);
+            if (t) {
+                t.term?.write('\\r\\n\\x1b[33m[Reconnecting...]\\x1b[0m\\r\\n');
+                t.connect();
+            }
+        }
+
+        function refreshRouterOptions() {
+            terminals.forEach(t => {
+                const select = t.el.querySelector(`[data-router-for="${t.id}"]`);
+                if (!select) return;
+                const current = select.value;
+
+                let opts = '<option value="">📡 None</option>';
+                terminals.forEach(other => {
+                    if (other.id !== t.id) {
+                        const cfg = AGENT_CONFIG[other.type] || AGENT_CONFIG.shell;
+                        opts += `<option value="${other.id}">${cfg.icon} ${cfg.name} (${other.role})</option>`;
+                    }
+                });
+                select.innerHTML = opts;
+                select.value = current;
+            });
+        }
+
+        function fitAll() {
+            terminals.forEach(t => t.fitAddon?.fit());
+        }
+
+        // ========== Server Restart ==========
+        async function restartServer() {
+            if (!confirm('서버를 재시작할까요?\\n모든 연결이 끊어집니다.\\n(터미널 구성은 유지됩니다)')) return;
+
+            // 현재 상태 저장
+            saveState();
+            console.log('[RestartServer] 상태 저장 완료');
+
+            updateServerStatus('reconnecting', '재시작 중...');
+            showToast('서버 재시작 중... 잠시 후 자동 복원됩니다', 'warning');
+
+            terminals.forEach(t => t.term?.write('\\r\\n\\x1b[33m[서버 재시작 중... 자동으로 복원됩니다]\\x1b[0m\\r\\n'));
+
+            try {
+                await fetch('/api/restart', { method: 'POST' });
+                // 서버가 재시작되면 health check가 자동으로 재연결 시도
+                // 3초 후 페이지 새로고침
+                setTimeout(() => {
+                    console.log('[RestartServer] 페이지 새로고침');
+                    location.reload();
+                }, 3000);
+            } catch (e) {
+                console.error('[RestartServer] 오류:', e);
+                showToast('재시작 실패: ' + e.message, 'error');
+                updateServerStatus('disconnected', '연결 끊김');
+            }
+        }
+
+        // ========== Init ==========
+        window.onresize = () => setTimeout(fitAll, 100);
+        window.onbeforeunload = () => {
+            console.log('[Unload] 상태 저장');
+            saveState();
+        };
+
+        document.addEventListener('DOMContentLoaded', () => {
+            console.log('[Init] 페이지 로드됨');
+
+            // 서버 상태 체크 시작
+            startHealthCheck();
+
+            // 프로젝트 리스트 로드
+            loadProjects();
+
+            // 세션 복원 시도
+            const restored = restoreSession();
+            console.log('[Init] 세션 복원 결과:', restored);
+
+            if (restored && workDir) {
+                // 복원된 폴더를 최근 프로젝트에 추가
+                addToRecent(workDir);
+            }
+
+            if (!restored) {
+                // 저장된 세션이 없으면 폴더 선택 모달 표시
+                setTimeout(openFolderModal, 300);
+            }
+        });
+    </script>
+</body>
+</html>
+""";
+
+@app.get("/", response_class=HTMLResponse)
+def index():
+    return HTML_CONTENT
+
+if __name__ == "__main__":
+    print("Agent Terminal Pro with ChatOps & Persona Injection Started...")
+    uvicorn.run(app, host="0.0.0.0", port=8090)

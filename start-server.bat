@@ -16,4 +16,3 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr :8090 ^| findstr LISTENING') 
 timeout /t 1 /nobreak >nul
 
 python server.py
-pause

@@ -23,6 +23,32 @@ except ImportError:
     print("[WARN] pywinpty not available - terminal disabled")
 
 
+# Role-based system prompts (Persona Injection)
+ROLE_PROMPTS = {
+    "PM": """You are an expert Technical Project Manager.
+Your Goal: Break down vague requirements into clear, actionable technical tasks.
+Rules:
+1. Do NOT write code implementation details.
+2. Focus on architecture, file structure, and step-by-step planning.
+3. Delegate implementation tasks to Developers.""",
+
+    "Dev": """You are a Senior Full-Stack Developer.
+Your Goal: Write clean, production-ready code based on instructions.
+Rules:
+1. Focus on implementation. Write filenames and code blocks clearly.
+2. If specifications are missing, ask the PM.
+3. Keep explanations concise. Code is your language.""",
+
+    "QA": """You are a QA Lead and Security Specialist.
+Your Goal: Find bugs, security flaws, and logic errors.
+Rules:
+1. Review code critically.
+2. Suggest test cases.
+3. Verify if the code meets requirements.""",
+
+    "General": None  # No special prompt
+}
+
 # Agent configurations - easily extensible
 # session_cmd: template for session resume (use {session_id} placeholder)
 # Each terminal gets a unique UUID for independent sessions
@@ -32,6 +58,7 @@ AGENT_CONFIGS = {
         "icon": "🔵",
         "command": "claude --dangerously-skip-permissions",
         "session_cmd": "--session-id {session_id}",  # UUID-based session (auto-create/resume)
+        "system_prompt_cmd": "--append-system-prompt",  # Inject role-based prompt
         "add_image_cmd": "add {path}",
         "prompt_char": ">",
         "color": "#7aa2f7",
@@ -94,10 +121,11 @@ class TerminalSession:
     """Single terminal session with PTY"""
 
     def __init__(self, session_id: str, working_dir: str = None,
-                 agent_type: AgentType = "claude", resume: bool = True):
+                 agent_type: AgentType = "claude", role: str = "General", resume: bool = True):
         self.session_id = session_id
         self.working_dir = working_dir or os.getcwd()
         self.agent_type = agent_type
+        self.role = role
         self.resume = resume
         self.pty: Optional[PtyProcess] = None
         self.websocket: Optional[WebSocket] = None
@@ -106,6 +134,14 @@ class TerminalSession:
 
         # Get agent config
         self.config = AGENT_CONFIGS.get(agent_type, AGENT_CONFIGS["claude"])
+
+    def _is_valid_uuid(self, s: str) -> bool:
+        """Check if string is valid UUID v4"""
+        import re
+        if not s:
+            return False
+        pattern = r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+        return bool(re.match(pattern, s, re.IGNORECASE))
 
     async def start(self, websocket: WebSocket):
         """Start terminal with AI CLI"""
@@ -122,8 +158,25 @@ class TerminalSession:
             # Build command with session support
             cmd = self.config["command"]
             session_cmd = self.config.get("session_cmd")
-            if session_cmd and self.session_id:
+
+            # Only add session ID if it's valid UUID (required by Claude CLI)
+            if session_cmd and self.session_id and self._is_valid_uuid(self.session_id):
                 cmd = f'{cmd} {session_cmd.format(session_id=self.session_id)}'
+            elif session_cmd and self.session_id:
+                # Invalid session ID format - skip session option
+                print(f"[Terminal] Warning: Invalid session ID format '{self.session_id}', skipping --session-id")
+
+            # Add role-based system prompt (Persona Injection)
+            # Note: Only for agents that support it (e.g., Claude with --append-system-prompt)
+            system_prompt_cmd = self.config.get("system_prompt_cmd")
+            role_prompt = ROLE_PROMPTS.get(self.role)
+            if system_prompt_cmd and role_prompt:
+                # Escape quotes in prompt
+                escaped_prompt = role_prompt.replace('"', '\\"').replace('\n', ' ')
+                cmd = f'{cmd} {system_prompt_cmd} "{escaped_prompt}"'
+
+            print(f"[Terminal] Starting: {cmd}")
+            print(f"[Terminal] Working dir: {self.working_dir}")
 
             self.pty = PtyProcess.spawn(
                 cmd,
@@ -131,6 +184,7 @@ class TerminalSession:
                 dimensions=(24, 80)
             )
             self._running = True
+            print(f"[Terminal] PTY spawned, PID: {self.pty.pid}, alive: {self.pty.isalive()}")
 
             # Start reading PTY output
             self._read_task = asyncio.create_task(self._read_pty_output())
@@ -145,6 +199,9 @@ class TerminalSession:
             return True
 
         except Exception as e:
+            import traceback
+            print(f"[Terminal] Failed to start: {e}")
+            traceback.print_exc()
             await websocket.send_json({
                 "type": "error",
                 "message": f"Failed to start {self.config['name']}: {e}"
@@ -154,15 +211,26 @@ class TerminalSession:
     async def _read_pty_output(self):
         """Read PTY output and send to WebSocket"""
         loop = asyncio.get_event_loop()
+        read_count = 0
 
-        while self._running and self.pty and self.pty.isalive():
+        print(f"[Terminal] Read loop started for {self.session_id[:8]}...")
+
+        while self._running and self.pty:
             try:
+                # Check if PTY is still alive before reading
+                if not self.pty.isalive():
+                    print(f"[Terminal] PTY not alive, exitcode: {self.pty.exitstatus}")
+                    break
+
                 data = await loop.run_in_executor(
                     None,
-                    lambda: self.pty.read(4096) if self.pty.isalive() else ""
+                    lambda: self.pty.read(4096) if self.pty and self.pty.isalive() else ""
                 )
 
                 if data and self.websocket:
+                    read_count += 1
+                    if read_count <= 3:  # Log first few reads
+                        print(f"[Terminal] Read #{read_count}: {len(data)} bytes")
                     await self.websocket.send_json({
                         "type": "terminal_output",
                         "data": data
@@ -171,16 +239,40 @@ class TerminalSession:
                 await asyncio.sleep(0.01)
 
             except Exception as e:
-                if self._running:
-                    print(f"[Terminal] Read error: {e}")
+                print(f"[Terminal] Read exception: {type(e).__name__}: {e}")
                 break
 
-        # Terminal closed
-        if self._running and self.websocket:
+        # Terminal closed - notify client with exit info
+        exit_code = None
+        try:
+            exit_code = self.pty.exitstatus if self.pty else None
+        except:
+            pass
+
+        print(f"[Terminal] Read loop ended for {self.session_id[:8]}..., total reads: {read_count}, exit_code: {exit_code}")
+
+        if self.websocket:
             try:
+                # Send detailed close message
                 await self.websocket.send_json({
-                    "type": "terminal_closed"
+                    "type": "terminal_closed",
+                    "exit_code": exit_code,
+                    "reads": read_count
                 })
+                # If process exited immediately (0 reads), send error hint
+                if read_count == 0:
+                    await self.websocket.send_json({
+                        "type": "terminal_output",
+                        "data": f"\\r\\n\\x1b[31m[프로세스가 즉시 종료됨 (exit: {exit_code})]\\x1b[0m\\r\\n"
+                    })
+                    await self.websocket.send_json({
+                        "type": "terminal_output",
+                        "data": "\\x1b[33m터미널에서 직접 명령어를 테스트해보세요:\\x1b[0m\\r\\n"
+                    })
+                    await self.websocket.send_json({
+                        "type": "terminal_output",
+                        "data": f"\\x1b[36m  {self.config['command']}\\x1b[0m\\r\\n"
+                    })
             except:
                 pass
 
@@ -274,6 +366,7 @@ async def handle_terminal_websocket(
     session_id: str,
     working_dir: str = None,
     agent_type: str = "claude",
+    role: str = "General",
     resume: bool = True,
     already_accepted: bool = False
 ):
@@ -285,12 +378,16 @@ async def handle_terminal_websocket(
     if agent_type not in AGENT_CONFIGS:
         agent_type = "claude"
 
+    # Validate role
+    if role not in ROLE_PROMPTS:
+        role = "General"
+
     # Create or get session
     if session_id in terminal_sessions:
         session = terminal_sessions[session_id]
         await session.stop()
 
-    session = TerminalSession(session_id, working_dir, agent_type=agent_type, resume=resume)
+    session = TerminalSession(session_id, working_dir, agent_type=agent_type, role=role, resume=resume)
     terminal_sessions[session_id] = session
 
     # Start terminal

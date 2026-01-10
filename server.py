@@ -7,7 +7,7 @@ Features:
 3. Inter-Agent Communication Message Bus
 """
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 import os
 import sys
@@ -25,7 +25,7 @@ try:
     from src.terminal import handle_terminal_websocket, get_available_agents, get_max_terminals
 except ImportError:
     # Standalone mock for robustness
-    async def handle_terminal_websocket(websocket, session_id, work_dir, agent_type, resume, already_accepted=False):
+    async def handle_terminal_websocket(websocket, session_id, work_dir, agent_type, role, resume, already_accepted=False):
         if not already_accepted:
             await websocket.accept()
         # Mock terminal behavior
@@ -207,7 +207,7 @@ async def terminal_websocket(
         await websocket.send_json({"type": "terminal_output", "data": prompt})
 
     try:
-        await handle_terminal_websocket(websocket, session_id, workdir, agent, resume=True, already_accepted=True)
+        await handle_terminal_websocket(websocket, session_id, workdir, agent, role=role, resume=True, already_accepted=True)
     except WebSocketDisconnect:
         pass
     finally:
@@ -267,6 +267,11 @@ HTML_CONTENT = """
 
         select { background: #2c3039; border: 1px solid var(--border); color: var(--text); font-family: inherit; font-size: 11px; padding: 4px 6px; border-radius: 4px; outline: none; cursor: pointer; }
         select:hover { border-color: var(--accent); }
+
+        /* Layout Buttons */
+        .layout-btn { background: #2c3039; border: 1px solid var(--border); color: #666; padding: 4px 6px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.15s; }
+        .layout-btn:hover { border-color: var(--accent); color: #999; }
+        .layout-btn.active { background: var(--accent); border-color: var(--accent); color: white; }
 
         /* Terminal Cell */
         .cell { display: flex; flex-direction: column; background: var(--panel); border: 2px solid var(--border); border-radius: 6px; overflow: hidden; min-height: 0; }
@@ -343,15 +348,24 @@ HTML_CONTENT = """
         .sidebar-section-content { max-height: 200px; overflow-y: auto; }
         .sidebar-section-content.collapsed { display: none; }
 
-        .project-item { display: flex; align-items: center; gap: 6px; padding: 6px 10px; font-size: 11px; cursor: pointer; color: #abb2bf; transition: background 0.1s; }
-        .project-item:hover { background: #2c3039; }
-        .project-item.active { background: var(--accent); color: white; }
+        .project-item { display: flex; align-items: center; gap: 6px; padding: 6px 10px; font-size: 11px; cursor: pointer; color: #abb2bf; transition: background 0.1s; border-left: 2px solid transparent; }
+        .project-item:hover { background: #2c3039; border-left-color: var(--accent); }
+        .project-item.active { background: var(--accent); color: white; border-left-color: white; }
         .project-item .icon { font-size: 14px; flex-shrink: 0; }
         .project-item .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .project-item .actions { display: none; gap: 2px; }
         .project-item:hover .actions { display: flex; }
         .project-item .action-btn { background: none; border: none; color: #5c6370; cursor: pointer; padding: 2px; font-size: 12px; border-radius: 3px; }
         .project-item .action-btn:hover { background: #3e4451; color: var(--text); }
+
+        /* File Explorer - 다른 스타일 */
+        .file-item { display: flex; align-items: center; gap: 6px; padding: 4px 8px; font-size: 11px; cursor: pointer; color: #8b949e; border-radius: 3px; }
+        .file-item:hover { background: #2c3039; color: #c9d1d9; }
+        .file-item.dir { color: #58a6ff; }
+        .file-item .file-icon { font-size: 12px; flex-shrink: 0; opacity: 0.8; }
+        .file-item .file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .file-item .file-actions { display: none; gap: 2px; }
+        .file-item:hover .file-actions { display: flex; }
     </style>
 </head>
 <body>
@@ -359,7 +373,7 @@ HTML_CONTENT = """
         <div class="header-left">
             <span style="font-size: 18px;">🤖</span>
             <span style="font-weight: bold; font-size: 14px;">Agent Terminal</span>
-            <span style="font-size: 10px; color: #5c6370; margin-left: -4px;">v1.0.0</span>
+            <span id="versionDisplay" style="font-size: 10px; color: #5c6370; margin-left: -4px;">v...</span>
             <div class="server-status disconnected" id="serverStatus">
                 <span class="dot"></span>
                 <span class="status-text">연결 중...</span>
@@ -368,13 +382,20 @@ HTML_CONTENT = """
             <button class="btn" onclick="toggleSidebar()">📂 파일 탐색</button>
         </div>
         <div class="header-right">
-            <select id="layoutSelect" onchange="setLayout(this.value)" title="터미널 레이아웃">
-                <option value="1">1개</option>
-                <option value="2">2개 (가로)</option>
-                <option value="3">3개 (가로)</option>
-                <option value="4">4개 (2x2)</option>
-                <option value="6">6개 (3x2)</option>
-            </select>
+            <div class="layout-buttons" style="display:flex; gap:3px;">
+                <button class="layout-btn active" data-layout="1" onclick="setLayout(1)" title="1개">
+                    <svg width="18" height="14" viewBox="0 0 18 14"><rect x="1" y="1" width="16" height="12" rx="1" fill="currentColor"/></svg>
+                </button>
+                <button class="layout-btn" data-layout="2" onclick="setLayout(2)" title="2개 (가로)">
+                    <svg width="18" height="14" viewBox="0 0 18 14"><rect x="1" y="1" width="7" height="12" rx="1" fill="currentColor"/><rect x="10" y="1" width="7" height="12" rx="1" fill="currentColor"/></svg>
+                </button>
+                <button class="layout-btn" data-layout="4" onclick="setLayout(4)" title="4개 (2x2)">
+                    <svg width="18" height="14" viewBox="0 0 18 14"><rect x="1" y="1" width="7" height="5" rx="1" fill="currentColor"/><rect x="10" y="1" width="7" height="5" rx="1" fill="currentColor"/><rect x="1" y="8" width="7" height="5" rx="1" fill="currentColor"/><rect x="10" y="8" width="7" height="5" rx="1" fill="currentColor"/></svg>
+                </button>
+                <button class="layout-btn" data-layout="6" onclick="setLayout(6)" title="6개 (3x2)">
+                    <svg width="18" height="14" viewBox="0 0 18 14"><rect x="1" y="1" width="4" height="5" rx="0.5" fill="currentColor"/><rect x="7" y="1" width="4" height="5" rx="0.5" fill="currentColor"/><rect x="13" y="1" width="4" height="5" rx="0.5" fill="currentColor"/><rect x="1" y="8" width="4" height="5" rx="0.5" fill="currentColor"/><rect x="7" y="8" width="4" height="5" rx="0.5" fill="currentColor"/><rect x="13" y="8" width="4" height="5" rx="0.5" fill="currentColor"/></svg>
+                </button>
+            </div>
             <select id="newAgentType" title="에이전트 타입">
                 <option value="claude">🔵 Claude</option>
                 <option value="gemini">🟢 Gemini</option>
@@ -390,6 +411,7 @@ HTML_CONTENT = """
             </select>
             <button class="btn primary" onclick="addAgent()">+ 터미널 추가</button>
             <button class="btn" onclick="restartServer()" title="서버 재시작" style="background:#e06c75;border-color:#e06c75;color:white;">🔄 서버 재시작</button>
+            <button class="btn" onclick="clearAllSessions()" title="모든 세션 초기화">🗑️ 초기화</button>
         </div>
     </header>
 
@@ -417,16 +439,19 @@ HTML_CONTENT = """
                 </div>
             </div>
 
-            <!-- 현재 폴더 -->
+            <!-- 현재 폴더 / 파일 탐색기 -->
             <div class="sidebar-section" style="flex:1; display:flex; flex-direction:column; border-bottom:none;">
-                <div class="sidebar-section-header" style="cursor:default;">
-                    <span>📂 현재 폴더</span>
-                    <button class="action-btn" onclick="openFolderModal()" title="폴더 변경" style="font-size:14px;">📁</button>
+                <div class="sidebar-section-header" style="cursor:default; background: #252830;">
+                    <span>📂 파일 탐색기</span>
+                    <div style="display:flex; gap:4px;">
+                        <button class="action-btn" onclick="goUpDirectory()" title="상위 폴더" style="font-size:12px;">⬆️</button>
+                        <button class="action-btn" onclick="openFolderModal()" title="폴더 변경" style="font-size:12px;">📁</button>
+                    </div>
                 </div>
-                <div style="padding: 4px 10px 8px; font-size: 11px;">
+                <div style="padding: 6px 10px; font-size: 10px; background: #1e2127; border-bottom: 1px solid var(--border);">
                     <span id="workDirDisplay" style="color: #61afef; cursor: pointer; word-break: break-all;" onclick="openFolderModal()">폴더를 선택하세요...</span>
                 </div>
-                <div id="fileTree" style="flex:1; overflow-y: auto; padding: 0 8px 8px; font-size: 12px; color: #abb2bf;"></div>
+                <div id="fileTree" style="flex:1; overflow-y: auto; padding: 4px;"></div>
             </div>
         </aside>
 
@@ -530,9 +555,11 @@ HTML_CONTENT = """
                     if (serverStatus !== 'connected') {
                         updateServerStatus('connected', '연결됨');
                         // 서버 재연결 시 터미널 재연결
+                        // ONLY reconnect if websocket is CLOSED (not CONNECTING or OPEN)
                         if (terminals.length > 0) {
                             terminals.forEach(t => {
-                                if (!t.ws || t.ws.readyState !== WebSocket.OPEN) {
+                                if (!t.ws || t.ws.readyState === WebSocket.CLOSED) {
+                                    console.log(`[HealthCheck] Reconnecting terminal ${t.id}`);
                                     t.connect();
                                 }
                             });
@@ -552,6 +579,19 @@ HTML_CONTENT = """
             if (healthCheckInterval) clearInterval(healthCheckInterval);
             healthCheckInterval = setInterval(checkServerHealth, 2000);
             checkServerHealth(); // 즉시 실행
+        }
+
+        // 버전 정보 가져오기
+        async function fetchVersion() {
+            try {
+                const res = await fetch('/api/version');
+                if (res.ok) {
+                    const data = await res.json();
+                    document.getElementById('versionDisplay').textContent = 'v' + data.version;
+                }
+            } catch (e) {
+                document.getElementById('versionDisplay').textContent = 'v?.?.?';
+            }
         }
 
         // ========== Project List Management ==========
@@ -688,6 +728,23 @@ HTML_CONTENT = """
             return crypto.randomUUID();
         }
 
+        // 기존 세션 ID가 UUID 형식인지 확인
+        function isValidUUID(str) {
+            if (!str) return false;
+            const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+            return uuidRegex.test(str);
+        }
+
+        // 기존 세션 ID를 UUID로 마이그레이션
+        function migrateSessionId(oldId) {
+            if (isValidUUID(oldId)) {
+                return oldId;  // 이미 UUID면 유지
+            }
+            // 새 UUID 생성
+            console.log(`[Migration] 세션 ID 마이그레이션: ${oldId} -> UUID`);
+            return generateUUID();
+        }
+
         // ========== Toast ==========
         function showToast(msg, type = 'info') {
             const container = document.getElementById('toastContainer');
@@ -746,15 +803,20 @@ HTML_CONTENT = """
 
             // 레이아웃 복원
             layoutCols = state.layoutCols || 1;
-            document.getElementById('layoutSelect').value = layoutCols;
             document.getElementById('grid').className = `grid cols-${layoutCols}`;
+            // Update layout buttons
+            document.querySelectorAll('.layout-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.layout == layoutCols);
+            });
 
             // 터미널 복원
             if (state.terminals && state.terminals.length > 0) {
                 console.log(`[RestoreSession] ${state.terminals.length}개 터미널 복원 시작`);
                 state.terminals.forEach((saved, idx) => {
-                    console.log(`[RestoreSession] 터미널 ${idx + 1} 생성:`, saved);
-                    createTerminal(saved.type, saved.role, saved.id, saved.sessionId, saved.targetId);
+                    // 세션 ID 마이그레이션 (UUID가 아니면 새로 생성)
+                    const migratedSessionId = migrateSessionId(saved.sessionId);
+                    console.log(`[RestoreSession] 터미널 ${idx + 1} 생성:`, { ...saved, sessionId: migratedSessionId });
+                    createTerminal(saved.type, saved.role, saved.id, migratedSessionId, saved.targetId);
                 });
 
                 // 라우팅 옵션 새로고침 및 라우팅 대상 복원
@@ -899,21 +961,86 @@ HTML_CONTENT = """
             try {
                 const res = await fetch(`/api/files?path=${encodeURIComponent(path)}`);
                 const data = await res.json();
+                currentFileTreePath = data.path;  // 현재 경로 저장
+                document.getElementById('workDirDisplay').textContent = data.path;
                 const tree = document.getElementById('fileTree');
                 tree.innerHTML = data.items.map(i => `
-                    <div style="padding:4px 8px; cursor:pointer; border-radius:3px;"
-                         onmouseover="this.style.background='#2c3039'"
-                         onmouseout="this.style.background='transparent'"
-                         onclick="${i.is_dir ? `loadFileTree('${i.path.replace(/\\\\/g, '\\\\\\\\')}')` : ''}">
-                        ${i.is_dir ? '📁' : '📄'} ${i.name}
+                    <div class="file-item ${i.is_dir ? 'dir' : ''}"
+                         onclick="${i.is_dir
+                             ? `loadFileTree('${i.path.replace(/\\\\/g, '\\\\\\\\')}')`
+                             : `sendFileToTerminal('${i.path.replace(/\\\\/g, '\\\\\\\\')}')`}">
+                        <span class="file-icon">${i.is_dir ? '📂' : getFileIcon(i.name)}</span>
+                        <span class="file-name">${i.name}</span>
+                        <div class="file-actions">
+                            ${!i.is_dir ? `<button class="action-btn" onclick="event.stopPropagation();copyFilePath('${i.path.replace(/\\\\/g, '\\\\\\\\')}')" title="경로 복사">📋</button>` : ''}
+                        </div>
                     </div>
                 `).join('');
             } catch (e) {}
         }
 
+        function getFileIcon(filename) {
+            const ext = filename.split('.').pop().toLowerCase();
+            const icons = {
+                'py': '🐍', 'js': '📜', 'ts': '📘', 'json': '📋', 'md': '📝',
+                'html': '🌐', 'css': '🎨', 'txt': '📄', 'yml': '⚙️', 'yaml': '⚙️',
+                'sh': '⚡', 'bat': '⚡', 'exe': '⚙️', 'png': '🖼️', 'jpg': '🖼️',
+                'gif': '🖼️', 'svg': '🖼️', 'pdf': '📕', 'zip': '📦', 'gz': '📦'
+            };
+            return icons[ext] || '📄';
+        }
+
+        let currentFileTreePath = null;
+
+        function goUpDirectory() {
+            if (!currentFileTreePath) return;
+            // Get parent directory
+            const parts = currentFileTreePath.replace(/\\\\/g, '/').split('/').filter(Boolean);
+            if (parts.length <= 1) {
+                // At root (e.g., "D:")
+                showToast('최상위 폴더입니다', 'info');
+                return;
+            }
+            parts.pop();
+            const parentPath = parts.join('/').replace(/\\//g, '\\\\');
+            // Handle Windows drive letters
+            const newPath = parts.length === 1 && parts[0].includes(':')
+                ? parts[0] + '\\\\'
+                : parentPath;
+            loadFileTree(newPath);
+        }
+
+        function sendFileToTerminal(filePath) {
+            // 활성 터미널에 파일 경로 전달
+            const activeTerminal = terminals.find(t => t.ws?.readyState === WebSocket.OPEN);
+            if (activeTerminal) {
+                // 파일 경로를 터미널에 입력으로 전달
+                const fileName = filePath.split(/[\\\\/]/).pop();
+                activeTerminal.ws.send(JSON.stringify({
+                    type: 'input',
+                    data: filePath
+                }));
+                showToast(`파일 경로 전송: ${fileName}`, 'success');
+            } else {
+                showToast('연결된 터미널이 없습니다', 'warning');
+            }
+        }
+
+        function copyFilePath(filePath) {
+            navigator.clipboard.writeText(filePath).then(() => {
+                showToast('경로가 복사되었습니다', 'success');
+            }).catch(() => {
+                showToast('복사 실패', 'error');
+            });
+        }
+
         function setLayout(n) {
             layoutCols = parseInt(n);
             document.getElementById('grid').className = `grid cols-${n}`;
+            // Update active button
+            document.querySelectorAll('.layout-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.layout == n);
+            });
             setTimeout(fitAll, 100);
             saveState();
         }
@@ -1083,6 +1210,14 @@ HTML_CONTENT = """
                     const dot = this.el.querySelector(`[data-dot-for="${this.id}"]`);
                     if (dot) dot.classList.add('live');
 
+                    // Only reset reconnect attempts after connection is stable (5 seconds)
+                    this.stableConnectionTimer = setTimeout(() => {
+                        if (this.ws?.readyState === WebSocket.OPEN) {
+                            this.reconnectAttempts = 0;
+                            console.log(`[Terminal ${this.id}] Connection stable, reset retry counter`);
+                        }
+                    }, 5000);
+
                     // Send initial resize
                     setTimeout(() => {
                         if (this.ws?.readyState === WebSocket.OPEN && this.term) {
@@ -1099,6 +1234,16 @@ HTML_CONTENT = """
                     const msg = JSON.parse(e.data);
                     switch (msg.type) {
                         case 'terminal_output':
+                            // Check for "Session ID already in use" error (Claude CLI specific)
+                            if (msg.data.includes('Session ID') && msg.data.includes('already in use')) {
+                                console.log('[Terminal] Session ID conflict detected, generating new session');
+                                this.term.write('\\r\\n\\x1b[33m[세션 충돌 감지 - 새 세션 생성 중...]\\x1b[0m\\r\\n');
+                                // Generate new session ID and reconnect
+                                this.sessionId = generateUUID();
+                                saveState();
+                                setTimeout(() => this.connect(), 1000);
+                                return;
+                            }
                             this.term.write(msg.data);
                             // Route to target if set
                             if (this.targetId) this.sendToTarget(msg.data);
@@ -1114,6 +1259,14 @@ HTML_CONTENT = """
                         case 'image_added':
                             this.term.write(`\\r\\n\\x1b[36m[Image: ${msg.filename}]\\x1b[0m\\r\\n`);
                             break;
+                        case 'terminal_closed':
+                            this.term.write(`\\r\\n\\x1b[33m[터미널 프로세스 종료됨]\\x1b[0m\\r\\n`);
+                            const dot = this.el.querySelector(`[data-dot-for="${this.id}"]`);
+                            if (dot) {
+                                dot.classList.remove('live');
+                                dot.style.background = '#e06c75';  // 빨간색으로 종료 표시
+                            }
+                            break;
                         case 'error':
                             this.term.write(`\\r\\n\\x1b[31m${msg.message}\\x1b[0m\\r\\n`);
                             break;
@@ -1124,14 +1277,30 @@ HTML_CONTENT = """
                     const dot = this.el.querySelector(`[data-dot-for="${this.id}"]`);
                     if (dot) dot.classList.remove('live');
 
-                    // Auto-reconnect after 3 seconds
+                    // Clear stable connection timer
+                    if (this.stableConnectionTimer) {
+                        clearTimeout(this.stableConnectionTimer);
+                        this.stableConnectionTimer = null;
+                    }
+
+                    // Auto-reconnect with retry limit (max 3 attempts)
                     if (workDir && !this.disposed) {
-                        this.term?.write('\\r\\n\\x1b[33m[Disconnected - Reconnecting in 3s...]\\x1b[0m\\r\\n');
-                        this.reconnectTimeout = setTimeout(() => {
-                            if (!this.disposed) {
-                                this.connect();
-                            }
-                        }, 3000);
+                        this.reconnectAttempts = (this.reconnectAttempts || 0) + 1;
+                        const maxRetries = 3;
+
+                        console.log(`[Terminal ${this.id}] Connection closed, attempt ${this.reconnectAttempts}/${maxRetries}`);
+
+                        if (this.reconnectAttempts <= maxRetries) {
+                            this.term?.write(`\\r\\n\\x1b[33m[연결 끊김 - 재연결 시도 ${this.reconnectAttempts}/${maxRetries}...]\\x1b[0m\\r\\n`);
+                            this.reconnectTimeout = setTimeout(() => {
+                                if (!this.disposed) {
+                                    this.connect();
+                                }
+                            }, 3000);
+                        } else {
+                            this.term?.write('\\r\\n\\x1b[31m[재연결 실패 - ↻ 버튼으로 수동 재연결하세요]\\x1b[0m\\r\\n');
+                            // Don't reset - user must click manually
+                        }
                     }
                 };
 
@@ -1278,7 +1447,9 @@ HTML_CONTENT = """
         function restartTerminal(terminalId) {
             const t = terminals.find(t => t.id === terminalId);
             if (t) {
-                t.term?.write('\\r\\n\\x1b[33m[Reconnecting...]\\x1b[0m\\r\\n');
+                // Reset retry counter on manual reconnect
+                t.reconnectAttempts = 0;
+                t.term?.write('\\r\\n\\x1b[33m[수동 재연결...]\\x1b[0m\\r\\n');
                 t.connect();
             }
         }
@@ -1303,6 +1474,37 @@ HTML_CONTENT = """
 
         function fitAll() {
             terminals.forEach(t => t.fitAddon?.fit());
+        }
+
+        // ========== Clear Sessions ==========
+        function clearAllSessions() {
+            if (!confirm('모든 세션을 초기화할까요?\\n터미널 구성과 프로젝트 목록이 삭제됩니다.')) return;
+
+            // 모든 터미널 종료
+            terminals.forEach(t => t.dispose());
+            terminals = [];
+
+            // Grid 초기화
+            document.getElementById('grid').innerHTML = '';
+
+            // localStorage 초기화
+            localStorage.removeItem(SESSION_KEY);
+            localStorage.removeItem(PROJECTS_KEY);
+
+            // 상태 초기화
+            workDir = null;
+            favorites = [];
+            recentProjects = [];
+
+            // UI 초기화
+            document.getElementById('workDirDisplay').textContent = '폴더를 선택하세요...';
+            document.getElementById('fileTree').innerHTML = '';
+            renderProjectLists();
+
+            showToast('모든 세션이 초기화되었습니다', 'success');
+
+            // 폴더 선택 모달 표시
+            setTimeout(openFolderModal, 300);
         }
 
         // ========== Server Restart ==========
@@ -1342,6 +1544,9 @@ HTML_CONTENT = """
 
         document.addEventListener('DOMContentLoaded', () => {
             console.log('[Init] 페이지 로드됨');
+
+            // 버전 정보 가져오기
+            fetchVersion();
 
             // 서버 상태 체크 시작
             startHealthCheck();

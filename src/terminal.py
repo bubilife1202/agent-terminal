@@ -25,12 +25,14 @@ except ImportError:
 
 # Agent configurations - easily extensible
 # session_cmd: template for session resume (use {session_id} placeholder)
+# NOTE: Claude's --resume option shows a session picker prompt, so we disable it
+#       Users can manually resume sessions using /resume command in Claude CLI
 AGENT_CONFIGS = {
     "claude": {
         "name": "Claude",
         "icon": "🔵",
         "command": "claude --dangerously-skip-permissions",
-        "session_cmd": "--resume {session_id}",
+        "session_cmd": None,  # Disabled: --resume shows interactive prompt
         "add_image_cmd": "add {path}",
         "prompt_char": ">",
         "color": "#7aa2f7",

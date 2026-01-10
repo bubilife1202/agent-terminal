@@ -7,7 +7,7 @@ Features:
 3. Inter-Agent Communication Message Bus
 """
 
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 
 import os
 import sys
@@ -1069,8 +1069,10 @@ HTML_CONTENT = """
 
             render() {
                 const cfg = AGENT_CONFIG[this.type] || AGENT_CONFIG.shell;
+                const termNum = terminals.indexOf(this) + 1;
                 this.el.innerHTML = `
                     <div class="cell-toolbar" style="border-left: 3px solid ${cfg.color};">
+                        <span class="term-number" style="color: ${cfg.color}; font-weight: bold; margin-right: 4px;">#${termNum}</span>
                         <span class="agent-icon">${cfg.icon}</span>
                         <span class="agent-name">${cfg.name}</span>
                         <select class="role-select" data-role-for="${this.id}" title="역할 변경">
@@ -1371,7 +1373,8 @@ HTML_CONTENT = """
                     const target = terminals.find(t => t.id === targetId);
                     if (target) {
                         const cfg = AGENT_CONFIG[target.type] || AGENT_CONFIG.shell;
-                        this.term.write(`\\r\\n\\x1b[36m[출력 라우팅: ${cfg.icon} ${cfg.name} (${target.role})로 전송]\\x1b[0m\\r\\n`);
+                        const targetNum = terminals.indexOf(target) + 1;
+                        this.term.write(`\\r\\n\\x1b[36m[출력 라우팅: #${targetNum} ${cfg.icon} ${cfg.name} (${target.role})로 전송]\\x1b[0m\\r\\n`);
                     }
                 } else {
                     this.term.write(`\\r\\n\\x1b[36m[출력 라우팅 해제]\\x1b[0m\\r\\n`);
@@ -1383,9 +1386,10 @@ HTML_CONTENT = """
                 const target = terminals.find(t => t.id === this.targetId);
                 if (target?.ws?.readyState === WebSocket.OPEN) {
                     const cfg = AGENT_CONFIG[this.type] || AGENT_CONFIG.shell;
+                    const myNum = terminals.indexOf(this) + 1;
                     target.ws.send(JSON.stringify({
                         type: 'input',
-                        data: `\\n[${cfg.name}]: ${data.replace(/\\x1b\\[[0-9;]*m/g, '').trim()}\\n`
+                        data: `\\n[#${myNum} ${cfg.name}]: ${data.replace(/\\x1b\\[[0-9;]*m/g, '').trim()}\\n`
                     }));
                 }
             }
@@ -1510,10 +1514,11 @@ HTML_CONTENT = """
                 const current = select.value;
 
                 let opts = '<option value="">📡 None</option>';
-                terminals.forEach(other => {
+                terminals.forEach((other, idx) => {
                     if (other.id !== t.id) {
                         const cfg = AGENT_CONFIG[other.type] || AGENT_CONFIG.shell;
-                        opts += `<option value="${other.id}">${cfg.icon} ${cfg.name} (${other.role})</option>`;
+                        const num = idx + 1;
+                        opts += `<option value="${other.id}">#${num} ${cfg.icon} ${cfg.name} (${other.role})</option>`;
                     }
                 });
                 select.innerHTML = opts;

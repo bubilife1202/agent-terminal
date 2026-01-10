@@ -56,12 +56,14 @@ async def test_agent_terminal():
                 print(f"      - {text.strip()}")
             results.append(("Header Buttons", len(buttons) >= 4))
 
-            # 5. 레이아웃 선택 확인
-            print("\n[5] Layout selector test...")
-            layout_select = await page.query_selector("#layoutSelect")
-            options = await layout_select.query_selector_all("option")
-            print(f"    OK - Layout options: {len(options)}")
-            results.append(("Layout Selector", len(options) == 5))
+            # 5. 레이아웃 버튼 확인
+            print("\n[5] Layout buttons test...")
+            layout_buttons = await page.query_selector_all(".layout-btn")
+            print(f"    OK - Layout buttons: {len(layout_buttons)}")
+            # Check if one is active
+            active_btn = await page.query_selector(".layout-btn.active")
+            print(f"    OK - Active button: {'found' if active_btn else 'none'}")
+            results.append(("Layout Buttons", len(layout_buttons) == 4 and active_btn is not None))
 
             # 6. 에이전트 타입 선택 확인
             print("\n[6] Agent type selector test...")

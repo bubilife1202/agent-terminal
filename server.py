@@ -7,7 +7,7 @@ Features:
 3. Inter-Agent Communication Message Bus
 """
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 import os
 import sys
@@ -1234,14 +1234,57 @@ HTML_CONTENT = """
                     const msg = JSON.parse(e.data);
                     switch (msg.type) {
                         case 'terminal_output':
+                            // Append to buffer for split message detection
+                            if (!this.outputBuffer) this.outputBuffer = '';
+                            this.outputBuffer += msg.data;
+                            // Keep buffer size reasonable (last 2000 chars)
+                            if (this.outputBuffer.length > 2000) {
+                                this.outputBuffer = this.outputBuffer.slice(-1000);
+                            }
+
                             // Check for "Session ID already in use" error (Claude CLI specific)
-                            if (msg.data.includes('Session ID') && msg.data.includes('already in use')) {
-                                console.log('[Terminal] Session ID conflict detected, generating new session');
+                            // Use comprehensive ANSI stripping (all escape sequences, not just colors)
+                            const stripAnsi = (s) => s.replace(/\\x1b\\[[^a-zA-Z]*[a-zA-Z]/g, '')
+                                                       .replace(/\\x1b\\][^\\x07]*\\x07/g, '')
+                                                       .replace(/[\\x00-\\x1f]/g, ' ');
+                            const plainText = stripAnsi(msg.data);
+                            const bufferText = stripAnsi(this.outputBuffer);
+
+                            // Debug: log incoming data for session conflict troubleshooting
+                            if (msg.data.toLowerCase().includes('session') || msg.data.toLowerCase().includes('error')) {
+                                console.log('[Terminal] Checking msg:', JSON.stringify(msg.data.slice(0, 200)));
+                                console.log('[Terminal] Plain text:', plainText.slice(0, 200));
+                            }
+
+                            // Use case-insensitive regex for robust detection
+                            const conflictPattern = /already\\s+in\\s+use/i;
+                            if (conflictPattern.test(plainText) || conflictPattern.test(bufferText) ||
+                                conflictPattern.test(msg.data) || conflictPattern.test(this.outputBuffer)) {
+                                console.log('[Terminal] Session conflict detected! Old:', this.sessionId);
+                                this.term.write(msg.data);  // Show error
                                 this.term.write('\\r\\n\\x1b[33m[세션 충돌 감지 - 새 세션 생성 중...]\\x1b[0m\\r\\n');
-                                // Generate new session ID and reconnect
+
+                                // Set flag FIRST to prevent auto-reconnect from onclose
+                                this.handlingSessionConflict = true;
+
+                                // Close current connection cleanly
+                                if (this.ws) {
+                                    this.ws.onclose = null;  // Prevent onclose handler
+                                    this.ws.close();
+                                }
+
+                                // Generate new session ID
                                 this.sessionId = generateUUID();
+                                console.log('[Terminal] New session ID:', this.sessionId);
+                                this.outputBuffer = '';  // Clear buffer
                                 saveState();
-                                setTimeout(() => this.connect(), 1000);
+
+                                // Reconnect with new session after delay
+                                setTimeout(() => {
+                                    this.handlingSessionConflict = false;
+                                    this.reconnectAttempts = 0;
+                                    this.connect();
+                                }, 1500);
                                 return;
                             }
                             this.term.write(msg.data);
@@ -1281,6 +1324,12 @@ HTML_CONTENT = """
                     if (this.stableConnectionTimer) {
                         clearTimeout(this.stableConnectionTimer);
                         this.stableConnectionTimer = null;
+                    }
+
+                    // Skip auto-reconnect if handling session conflict (we'll reconnect ourselves)
+                    if (this.handlingSessionConflict) {
+                        console.log('[Terminal] Skipping auto-reconnect (handling session conflict)');
+                        return;
                     }
 
                     // Auto-reconnect with retry limit (max 3 attempts)

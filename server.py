@@ -7,7 +7,7 @@ Features:
 3. Inter-Agent Communication Message Bus
 """
 
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 
 import os
 import sys
@@ -568,10 +568,16 @@ HTML_CONTENT = """
             const url = new URL(window.location);
             if (projectHash) {
                 url.searchParams.set('project', projectHash);
+                // 마지막 프로젝트로 저장
+                localStorage.setItem('agent-terminal-last-project', projectHash);
             } else {
                 url.searchParams.delete('project');
             }
             window.history.replaceState({}, '', url);
+        }
+
+        function getLastProject() {
+            return localStorage.getItem('agent-terminal-last-project');
         }
 
         function getProjectFromUrl() {
@@ -1668,13 +1674,13 @@ HTML_CONTENT = """
             // 프로젝트 리스트 로드
             loadProjects();
 
-            // URL에서 프로젝트 해시 확인
-            const urlProjectHash = getProjectFromUrl();
+            // URL에서 프로젝트 해시 확인, 없으면 마지막 프로젝트 사용
+            let projectHash = getProjectFromUrl() || getLastProject();
             let restored = false;
 
-            if (urlProjectHash) {
-                console.log(`[Init] URL에서 프로젝트 복원: ${urlProjectHash}`);
-                restored = restoreSession(urlProjectHash);
+            if (projectHash) {
+                console.log(`[Init] 프로젝트 복원 시도: ${projectHash}`);
+                restored = restoreSession(projectHash);
             }
 
             console.log('[Init] 세션 복원 결과:', restored);

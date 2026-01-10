@@ -7,7 +7,7 @@ Features:
 3. Inter-Agent Communication Message Bus
 """
 
-__version__ = "1.0.5"
+__version__ = "1.0.6"
 
 import os
 import sys
@@ -738,14 +738,12 @@ HTML_CONTENT = """
             return uuidRegex.test(str);
         }
 
-        // 기존 세션 ID를 UUID로 마이그레이션
+        // 세션 복원 시 항상 새 UUID 생성 (Claude CLI 세션 충돌 방지)
         function migrateSessionId(oldId) {
-            if (isValidUUID(oldId)) {
-                return oldId;  // 이미 UUID면 유지
-            }
-            // 새 UUID 생성
-            console.log(`[Migration] 세션 ID 마이그레이션: ${oldId} -> UUID`);
-            return generateUUID();
+            // 항상 새 UUID 생성 - 이전 세션이 정상 종료되지 않았을 수 있음
+            const newId = generateUUID();
+            console.log(`[Session] 새 세션 ID 생성: ${newId} (이전: ${oldId || 'none'})`);
+            return newId;
         }
 
         // ========== Toast ==========

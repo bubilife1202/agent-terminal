@@ -351,9 +351,17 @@ class TerminalSession:
 
         if self.pty:
             try:
-                self.pty.terminate()
-            except:
-                pass
+                # Force kill on Windows
+                if self.pty.isalive():
+                    pid = self.pty.pid
+                    self.pty.terminate(force=True)
+                    # Extra: kill process tree on Windows
+                    if os.name == 'nt':
+                        import subprocess
+                        subprocess.run(['taskkill', '/F', '/T', '/PID', str(pid)],
+                                      capture_output=True, timeout=5)
+            except Exception as e:
+                print(f"[Terminal] Stop error: {e}")
             self.pty = None
 
 

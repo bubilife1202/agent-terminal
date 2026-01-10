@@ -7,7 +7,7 @@ Features:
 3. Inter-Agent Communication Message Bus
 """
 
-__version__ = "1.0.4"
+__version__ = "1.0.5"
 
 import os
 import sys
@@ -411,12 +411,6 @@ HTML_CONTENT = """
                 <option value="codex">🟠 Codex</option>
                 <option value="opencode">🟣 OpenCode</option>
                 <option value="shell">⚪ Shell</option>
-            </select>
-            <select id="newAgentRole" title="에이전트 역할">
-                <option value="General">General</option>
-                <option value="PM">👑 PM</option>
-                <option value="Dev">💻 Dev</option>
-                <option value="QA">🛡️ QA</option>
             </select>
             <button class="btn primary" onclick="addAgent()">+ 터미널 추가</button>
             <button class="btn" onclick="restartServer()" title="서버 재시작" style="background:#e06c75;border-color:#e06c75;color:white;">🔄 서버 재시작</button>
@@ -1469,7 +1463,7 @@ HTML_CONTENT = """
                 return;
             }
             const type = document.getElementById('newAgentType').value;
-            const role = document.getElementById('newAgentRole').value;
+            const role = 'General';  // 역할은 터미널별로 변경 가능
             const cfg = AGENT_CONFIG[type];
 
             // 단일 인스턴스 에이전트 중복 체크

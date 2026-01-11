@@ -145,6 +145,12 @@ let draggedTab = null;
 let dragOverTab = null;
 
 function handleTabDragStart(e) {
+    // Prevent drag from close button
+    if (e.target.classList.contains('tab-close')) {
+        e.preventDefault();
+        return;
+    }
+    
     draggedTab = e.target.closest('.project-tab');
     if (!draggedTab) return;
     
@@ -195,6 +201,12 @@ function handleTabDrop(e) {
     e.preventDefault();
     
     if (!draggedTab || !dragOverTab) return;
+    
+    // Safety check - tab might have been removed during drag
+    if (!draggedTab.dataset || !dragOverTab.tab.dataset) {
+        cleanupDrag();
+        return;
+    }
     
     const fromPath = draggedTab.dataset.path;
     const toTab = dragOverTab.tab;

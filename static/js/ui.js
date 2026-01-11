@@ -61,6 +61,7 @@ function switchProject(path) {
     document.getElementById('workDirDisplay').textContent = getProjectName(path);
     loadFiles(path);
     updateLayoutButtons();
+    updateProjectEmptyState(path);
     setTimeout(() => fitAllTerminals(), 100);
     updateEmptyState();
 }
@@ -98,11 +99,45 @@ function createProjectContent(path) {
     const div = document.createElement('div');
     div.className = 'project-content';
     div.dataset.path = path;
+    
+    // Generate agent cards HTML
+    const agentCardsHtml = Object.entries(AGENTS).map(([type, config]) => `
+        <div class="agent-card" onclick="createTerminal('${type}', 'General')">
+            <div class="icon">${config.icon}</div>
+            <div class="name">${config.name}</div>
+        </div>
+    `).join('');
+    
     div.innerHTML = `
+        <div class="project-empty-state" data-empty="${path}">
+            <h2>Select an Agent</h2>
+            <p>Choose an agent to start working in this project</p>
+            <div class="agent-cards">
+                ${agentCardsHtml}
+            </div>
+        </div>
         <div class="grid-container grid-1" data-grid="${path}">
         </div>
     `;
     container.appendChild(div);
+}
+
+function updateProjectEmptyState(path) {
+    const emptyState = document.querySelector(`.project-empty-state[data-empty="${CSS.escape(path)}"]`);
+    const gridContainer = document.querySelector(`.grid-container[data-grid="${CSS.escape(path)}"]`);
+    
+    if (!emptyState || !gridContainer) return;
+    
+    const proj = state.projects[path];
+    const hasTerminals = proj && proj.terminals.length > 0;
+    
+    if (hasTerminals) {
+        emptyState.style.display = 'none';
+        gridContainer.style.display = 'grid';
+    } else {
+        emptyState.style.display = 'flex';
+        gridContainer.style.display = 'none';
+    }
 }
 
 function renderProjectTabs() {
@@ -296,22 +331,55 @@ function toggleSidebar() {
 }
 
 // --- File Explorer ---
+let currentFilePath = null;  // Track current directory for navigation
+let currentFilePreviewPath = null;  // Track file being previewed
+
 function createFileItem(item) {
     const div = document.createElement('div');
     div.className = `file-item ${state.activeProject === item.path ? 'active' : ''}`;
-    div.innerHTML = `<span class="file-icon">${item.is_dir ? '📂' : '📄'}</span><span>${escapeHtml(item.name)}</span>`;
+    
+    // Better file icons based on extension
+    let icon = '📄';
+    if (item.is_dir) {
+        icon = '📂';
+    } else {
+        const ext = item.name.split('.').pop().toLowerCase();
+        const iconMap = {
+            'md': '📝', 'txt': '📝',
+            'js': '🟨', 'ts': '🔷', 'jsx': '⚛️', 'tsx': '⚛️',
+            'py': '🐍', 'rb': '💎', 'go': '🔵', 'rs': '🦀',
+            'html': '🌐', 'css': '🎨', 'scss': '🎨',
+            'json': '📋', 'yaml': '📋', 'yml': '📋', 'toml': '📋',
+            'png': '🖼️', 'jpg': '🖼️', 'jpeg': '🖼️', 'gif': '🖼️', 'svg': '🖼️',
+            'pdf': '📕', 'doc': '📘', 'docx': '📘',
+            'zip': '📦', 'tar': '📦', 'gz': '📦',
+            'sh': '⚙️', 'bash': '⚙️', 'zsh': '⚙️',
+            'gitignore': '🙈', 'env': '🔐'
+        };
+        icon = iconMap[ext] || '📄';
+    }
+    
+    div.innerHTML = `<span class="file-icon">${icon}</span><span>${escapeHtml(item.name)}</span>`;
     div.addEventListener('click', () => {
-        if (item.is_dir) loadFiles(item.path);
-        else pastePath(item.path);
+        if (item.is_dir) {
+            loadFiles(item.path);
+        } else {
+            openFilePreview(item.path);
+        }
     });
     return div;
 }
+
+let currentParentPath = null;  // Track parent for navigation
 
 async function loadFiles(path) {
     if (!path) return;
     try {
         const res = await fetch(`/api/files?path=${encodeURIComponent(path)}`);
         const data = await res.json();
+
+        currentFilePath = data.path || path;
+        currentParentPath = data.parent || null;
 
         const tree = document.getElementById('fileTree');
         tree.innerHTML = '';
@@ -325,8 +393,21 @@ async function loadFiles(path) {
 }
 
 function refreshFiles() {
-    if (state.activeProject) {
+    if (currentFilePath) {
+        loadFiles(currentFilePath);
+    } else if (state.activeProject) {
         loadFiles(state.activeProject);
+    }
+}
+
+function navigateToParent() {
+    if (currentParentPath) {
+        loadFiles(currentParentPath);
+    } else if (currentFilePath && currentFilePath !== state.activeProject) {
+        // Fallback: go to project root
+        loadFiles(state.activeProject);
+    } else {
+        showToast('Already at root', 'warning');
     }
 }
 
@@ -340,6 +421,100 @@ function pastePath(path) {
         showToast('No active terminal to send path', 'warning');
     }
 }
+
+// --- File Preview ---
+async function openFilePreview(path) {
+    currentFilePreviewPath = path;
+    const modal = document.getElementById('filePreviewModal');
+    const content = document.getElementById('filePreviewContent');
+    const fileName = document.getElementById('filePreviewName');
+    
+    // Show modal with loading state
+    modal.classList.add('show');
+    content.innerHTML = `
+        <div class="file-preview-loading">
+            <div class="spinner"></div>
+            <span>Loading...</span>
+        </div>
+    `;
+    fileName.textContent = path.split(/[/\\]/).pop();
+    
+    try {
+        const res = await fetch(`/api/file-content?path=${encodeURIComponent(path)}`);
+        const data = await res.json();
+        
+        if (!res.ok || data.error) {
+            content.innerHTML = `
+                <div class="file-preview-error">
+                    <span class="error-icon">⚠️</span>
+                    <span>${escapeHtml(data.message || data.error || 'Failed to load file')}</span>
+                </div>
+            `;
+            return;
+        }
+        
+        // Render content based on file type
+        if (data.language === 'markdown') {
+            // Render markdown
+            const rendered = marked.parse(data.content);
+            content.innerHTML = `<div class="file-preview-markdown">${rendered}</div>`;
+            // Apply syntax highlighting to code blocks in markdown
+            content.querySelectorAll('pre code').forEach(block => {
+                hljs.highlightElement(block);
+            });
+        } else {
+            // Render as code with syntax highlighting
+            const escaped = escapeHtml(data.content);
+            content.innerHTML = `<pre class="file-preview-code"><code class="language-${data.language}">${escaped}</code></pre>`;
+            content.querySelectorAll('pre code').forEach(block => {
+                hljs.highlightElement(block);
+            });
+        }
+    } catch (e) {
+        console.error('File preview error:', e);
+        content.innerHTML = `
+            <div class="file-preview-error">
+                <span class="error-icon">❌</span>
+                <span>Failed to load file</span>
+            </div>
+        `;
+    }
+}
+
+function closeFilePreview() {
+    document.getElementById('filePreviewModal').classList.remove('show');
+    currentFilePreviewPath = null;
+}
+
+function copyFilePath() {
+    if (currentFilePreviewPath) {
+        navigator.clipboard.writeText(currentFilePreviewPath).then(() => {
+            showToast('Path copied!', 'success');
+        }).catch(() => {
+            showToast('Failed to copy', 'error');
+        });
+    }
+}
+
+// Close file preview with ESC key
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+        const modal = document.getElementById('filePreviewModal');
+        if (modal && modal.classList.contains('show')) {
+            closeFilePreview();
+        }
+    }
+});
+
+// Close file preview when clicking outside
+document.addEventListener('click', (e) => {
+    const modal = document.getElementById('filePreviewModal');
+    if (modal && modal.classList.contains('show')) {
+        if (e.target === modal) {
+            closeFilePreview();
+        }
+    }
+});
 
 // --- Folder Modal ---
 function openFolderModal() {

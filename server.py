@@ -7,7 +7,7 @@ Features:
 3. Inter-Agent Communication Message Bus
 """
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
 import os
 import sys
@@ -254,10 +254,88 @@ async def list_files_api(path: str):
             return {"path": path, "items": [], "error": "Invalid directory path"}
         items = [{"name": i.name, "path": str(i), "is_dir": i.is_dir()}
                  for i in base.iterdir() if not i.name.startswith('.')]
-        return {"path": str(base), "items": sorted(items, key=lambda x: (not x['is_dir'], x['name']))[:200]}
+        # Include parent path for navigation
+        parent = str(base.parent) if base.parent != base else None
+        return {"path": str(base), "parent": parent, "items": sorted(items, key=lambda x: (not x['is_dir'], x['name']))[:200]}
     except (OSError, ValueError, PermissionError) as e:
         print(f"[API] Error listing files for path '{path}': {e}")
         return {"path": path, "items": []}
+
+@app.get("/api/file-content")
+async def get_file_content(path: str):
+    """Read file content for preview"""
+    try:
+        file_path = Path(path).resolve()
+        
+        # Security: check file exists and is a file
+        if not file_path.exists():
+            return JSONResponse({"error": "File not found"}, status_code=404)
+        if not file_path.is_file():
+            return JSONResponse({"error": "Not a file"}, status_code=400)
+        
+        # Check file size (limit to 1MB)
+        file_size = file_path.stat().st_size
+        if file_size > 1024 * 1024:
+            return JSONResponse({
+                "error": "File too large",
+                "size": file_size,
+                "message": "File exceeds 1MB limit"
+            }, status_code=400)
+        
+        # Check if binary file
+        BINARY_EXTENSIONS = {'.exe', '.dll', '.so', '.dylib', '.bin', '.obj', '.o',
+                           '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico', '.webp',
+                           '.mp3', '.mp4', '.wav', '.avi', '.mov', '.mkv',
+                           '.zip', '.tar', '.gz', '.rar', '.7z',
+                           '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+                           '.pyc', '.pyd', '.whl', '.egg'}
+        if file_path.suffix.lower() in BINARY_EXTENSIONS:
+            return JSONResponse({
+                "error": "Binary file",
+                "message": "Cannot preview binary files"
+            }, status_code=400)
+        
+        # Try to read as text
+        try:
+            content = file_path.read_text(encoding='utf-8')
+        except UnicodeDecodeError:
+            try:
+                content = file_path.read_text(encoding='cp949')  # Korean encoding fallback
+            except UnicodeDecodeError:
+                return JSONResponse({
+                    "error": "Binary file",
+                    "message": "File appears to be binary or has unknown encoding"
+                }, status_code=400)
+        
+        # Determine file type for syntax highlighting
+        ext = file_path.suffix.lower()
+        lang_map = {
+            '.py': 'python', '.js': 'javascript', '.ts': 'typescript',
+            '.jsx': 'javascript', '.tsx': 'typescript', '.json': 'json',
+            '.html': 'html', '.css': 'css', '.scss': 'scss', '.less': 'less',
+            '.md': 'markdown', '.yaml': 'yaml', '.yml': 'yaml',
+            '.sh': 'bash', '.bash': 'bash', '.zsh': 'bash',
+            '.sql': 'sql', '.xml': 'xml', '.java': 'java',
+            '.c': 'c', '.cpp': 'cpp', '.h': 'c', '.hpp': 'cpp',
+            '.go': 'go', '.rs': 'rust', '.rb': 'ruby', '.php': 'php',
+            '.swift': 'swift', '.kt': 'kotlin', '.scala': 'scala',
+            '.r': 'r', '.R': 'r', '.lua': 'lua', '.pl': 'perl',
+            '.toml': 'toml', '.ini': 'ini', '.cfg': 'ini',
+            '.dockerfile': 'dockerfile', '.gitignore': 'plaintext',
+            '.env': 'plaintext', '.txt': 'plaintext'
+        }
+        language = lang_map.get(ext, 'plaintext')
+        
+        return {
+            "path": str(file_path),
+            "name": file_path.name,
+            "content": content,
+            "language": language,
+            "size": file_size
+        }
+    except (OSError, ValueError, PermissionError) as e:
+        print(f"[API] Error reading file '{path}': {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.post("/api/restart")
 async def restart_server():

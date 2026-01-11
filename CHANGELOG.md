@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-01-11
+
+### Added
+- **File Preview Modal**: Click any file in sidebar to preview contents
+  - Markdown files rendered beautifully (headings, lists, code blocks, tables)
+  - Code files with syntax highlighting (Tokyo Night theme via highlight.js)
+  - ESC / click outside / X button to close
+  - Copy path button in modal header
+  - Error handling for binary files and large files (>1MB limit)
+- **Parent Folder Navigation**: Added ⬆ button in File Explorer header
+  - Click to navigate to parent directory
+  - Works with current browsing path, not just project root
+- **Project Agent Selection**: When opening a new folder, shows agent selection cards
+  - Select which agent (Claude, Gemini, Codex, OpenCode, Shell) to start
+  - Cards reappear when all terminals are closed
+- **File Type Icons**: Enhanced file icons in explorer
+  - Different icons per file type (📝 md, 🐍 py, 🟨 js, 🔷 ts, etc.)
+  - Visual distinction between file types at a glance
+
+### Technical
+- New API endpoint: `/api/file-content` for reading file contents
+- Added marked.js CDN for markdown rendering
+- Added highlight.js CDN with Tokyo Night theme
+- New CSS: `.file-preview-modal`, `.file-preview-markdown`, `.project-empty-state`
+- New functions: `openFilePreview()`, `closeFilePreview()`, `navigateToParent()`, `updateProjectEmptyState()`
+
 ## [1.5.0] - 2026-01-11
 
 ### Changed

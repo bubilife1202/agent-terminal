@@ -36,6 +36,11 @@ function createTerminal(type, role = 'General', id = null) {
                 <span class="role-badge ${role}" onclick="cycleRole('${terminalId}')">${role}</span>
             </div>
             <div class="term-actions">
+                <button class="auto-btn" onclick="toggleAutoContinue('${terminalId}')" title="Auto-Continue Mode">
+                    <span class="auto-indicator"></span>
+                    <span>Auto</span>
+                    <span class="iteration-count"></span>
+                </button>
                 <button class="term-btn" onclick="restartTerminal('${terminalId}')" title="Restart Session">↻</button>
                 <button class="term-btn" onclick="toggleMaximize('${terminalId}')" title="Maximize">⤢</button>
                 <button class="term-btn close" onclick="closeTerminal('${terminalId}')" title="Close">✕</button>
@@ -110,7 +115,18 @@ function createTerminal(type, role = 'General', id = null) {
         ws: null,
         el: cell,
         projectPath: state.activeProject,
-        resizeObserver: resizeObserver
+        resizeObserver: resizeObserver,
+        // Auto-continue state
+        auto: {
+            enabled: false,
+            lastOutputTime: 0,
+            iterationCount: 0,
+            maxIterations: 10,
+            idleThreshold: 10000,  // 10 seconds
+            checkInterval: null,
+            outputBuffer: '',
+            lastError: ''
+        }
     };
     
     proj.terminals.push(termObj);
@@ -119,6 +135,7 @@ function createTerminal(type, role = 'General', id = null) {
 
     renderProjectTabs();
     autoLayout();
+    updateProjectEmptyState(state.activeProject);
     saveStateLater();
 
     term.onData(data => {
@@ -196,6 +213,31 @@ function connectTerminal(termObj, retryCount = 0) {
             const msg = JSON.parse(event.data);
             if (msg.type === 'terminal_output') {
                 termObj.term.write(msg.data);
+                
+                // Auto-continue: track output
+                if (termObj.auto.enabled) {
+                    termObj.auto.lastOutputTime = Date.now();
+                    termObj.auto.outputBuffer += msg.data;
+                    
+                    // Check for completion signal
+                    if (termObj.auto.outputBuffer.includes('=== DONE ===')) {
+                        stopAutoContinue(termObj.id);
+                        showToast(`✅ 작업 완료! (${termObj.auto.iterationCount}회 반복)`, 'success');
+                        termObj.term.write('\r\n\x1b[32m[Auto-Continue: Task completed!]\x1b[0m\r\n');
+                    }
+                    
+                    // Stuck detection: same error repeating
+                    const errorMatch = msg.data.match(/error|exception|failed|traceback/i);
+                    if (errorMatch) {
+                        const errorSnippet = msg.data.substring(0, 200);
+                        if (termObj.auto.lastError === errorSnippet) {
+                            stopAutoContinue(termObj.id);
+                            showToast('⚠️ 동일 에러 반복 감지 - 자동 중단', 'warning');
+                            termObj.term.write('\r\n\x1b[33m[Auto-Continue: Stopped - same error repeating]\x1b[0m\r\n');
+                        }
+                        termObj.auto.lastError = errorSnippet;
+                    }
+                }
             } else if (msg.type === 'image_added') {
                 termObj.term.write(`\r\n\x1b[35m[Image Added: ${msg.filename}]\x1b[0m\r\n`);
             } else if (msg.type === 'error') {
@@ -217,9 +259,13 @@ function closeTerminal(id) {
     const found = findTerminal(id);
     if (!found) return;
 
-    const { terminal: t, project: proj } = found;
+    const { terminal: t, project: proj, projectPath } = found;
     const idx = proj.terminals.findIndex(x => x.id === id);
     if (idx !== -1) {
+        // Stop auto-continue if active
+        if (t.auto && t.auto.checkInterval) {
+            clearInterval(t.auto.checkInterval);
+        }
         if (t.ws) {
             t.ws.onopen = null;
             t.ws.onclose = null;
@@ -233,6 +279,7 @@ function closeTerminal(id) {
         proj.terminals.splice(idx, 1);
         renderProjectTabs();
         autoLayout();
+        updateProjectEmptyState(projectPath);
         saveStateLater();
     }
 }
@@ -313,6 +360,119 @@ async function handlePaste(termObj) {
             if (termObj.term) termObj.term.paste(text);
         } catch (err) {
             showToast('Clipboard access denied', 'error');
+        }
+    }
+}
+
+// ========== Auto-Continue Mode ==========
+
+const AUTO_CONTINUE_PROMPT = `
+지금까지 작성한 내용을 테스트해줘.
+- 테스트가 실패하면 수정하고 다시 테스트해
+- 테스트가 성공하면 edge case, 에러 처리, 코드 품질을 검토해서 개선해
+- 더 이상 개선할 게 없으면 '=== DONE ===' 이라고 출력해
+`;
+
+function toggleAutoContinue(id) {
+    const found = findTerminal(id);
+    if (!found) return;
+    
+    const t = found.terminal;
+    if (t.auto.enabled) {
+        stopAutoContinue(id);
+    } else {
+        startAutoContinue(id);
+    }
+}
+
+function startAutoContinue(id) {
+    const found = findTerminal(id);
+    if (!found) return;
+    
+    const t = found.terminal;
+    t.auto.enabled = true;
+    t.auto.iterationCount = 0;
+    t.auto.outputBuffer = '';
+    t.auto.lastOutputTime = Date.now();
+    t.auto.lastError = '';
+    
+    // Update UI
+    updateAutoButton(id, true);
+    t.term.write('\r\n\x1b[36m[Auto-Continue: ON - 작업 완료까지 자동 진행]\x1b[0m\r\n');
+    showToast('🔄 Auto-Continue 활성화', 'success');
+    
+    // Start check interval (every 3 seconds)
+    t.auto.checkInterval = setInterval(() => {
+        checkAutoContinue(t);
+    }, 3000);
+}
+
+function stopAutoContinue(id) {
+    const found = findTerminal(id);
+    if (!found) return;
+    
+    const t = found.terminal;
+    t.auto.enabled = false;
+    
+    if (t.auto.checkInterval) {
+        clearInterval(t.auto.checkInterval);
+        t.auto.checkInterval = null;
+    }
+    
+    // Update UI
+    updateAutoButton(id, false);
+    t.term.write('\r\n\x1b[90m[Auto-Continue: OFF]\x1b[0m\r\n');
+}
+
+function checkAutoContinue(termObj) {
+    if (!termObj.auto.enabled) return;
+    
+    const timeSinceLastOutput = Date.now() - termObj.auto.lastOutputTime;
+    
+    // Check if idle for threshold time
+    if (timeSinceLastOutput >= termObj.auto.idleThreshold) {
+        // Check max iterations
+        if (termObj.auto.iterationCount >= termObj.auto.maxIterations) {
+            stopAutoContinue(termObj.id);
+            showToast(`⚠️ 최대 반복 횟수(${termObj.auto.maxIterations}) 도달`, 'warning');
+            termObj.term.write('\r\n\x1b[33m[Auto-Continue: Max iterations reached]\x1b[0m\r\n');
+            return;
+        }
+        
+        // Send continuation prompt
+        termObj.auto.iterationCount++;
+        termObj.auto.outputBuffer = '';
+        termObj.auto.lastOutputTime = Date.now();
+        
+        // Update iteration display
+        updateAutoButton(termObj.id, true, termObj.auto.iterationCount);
+        
+        termObj.term.write(`\r\n\x1b[36m[Auto-Continue: Iteration ${termObj.auto.iterationCount}/${termObj.auto.maxIterations}]\x1b[0m\r\n`);
+        
+        if (termObj.ws && termObj.ws.readyState === WebSocket.OPEN) {
+            termObj.ws.send(JSON.stringify({
+                type: 'input',
+                data: AUTO_CONTINUE_PROMPT + '\n'
+            }));
+        }
+    }
+}
+
+function updateAutoButton(id, active, iteration = 0) {
+    const btn = document.querySelector(`#term-${id} .auto-btn`);
+    if (!btn) return;
+    
+    if (active) {
+        btn.classList.add('active');
+        const countSpan = btn.querySelector('.iteration-count');
+        if (countSpan) {
+            countSpan.textContent = iteration > 0 ? `(${iteration}/10)` : '';
+        }
+    } else {
+        btn.classList.remove('active');
+        const countSpan = btn.querySelector('.iteration-count');
+        if (countSpan) {
+            countSpan.textContent = '';
         }
     }
 }

@@ -9,7 +9,11 @@ import asyncio
 import json
 import base64
 import os
+import re
+import subprocess
 import tempfile
+import traceback
+import uuid
 from pathlib import Path
 from typing import Optional, Literal
 from fastapi import WebSocket, WebSocketDisconnect
@@ -76,6 +80,17 @@ AGENT_CONFIGS = {
         "supports_image": True,
         "description": "Google Gemini CLI"
     },
+    "gemini-thinking": {
+        "name": "Gemini (Thinking)",
+        "icon": "🧠",
+        "command": "gemini --yolo --model gemini-2.0-flash-thinking-exp",
+        "session_cmd": None,
+        "add_image_cmd": "add {path}",
+        "prompt_char": ">",
+        "color": "#7dcfff",
+        "supports_image": True,
+        "description": "Gemini 2.0 Flash Thinking"
+    },
     "codex": {
         "name": "Codex",
         "icon": "🟠",
@@ -91,7 +106,7 @@ AGENT_CONFIGS = {
         "name": "OpenCode",
         "icon": "🟣",
         "command": "opencode",
-        "session_cmd": "--session {session_id}",  # UUID-based session support
+        "session_cmd": None,  # OpenCode uses internal session IDs (ses_xxx format), not UUIDs
         "add_image_cmd": None,
         "prompt_char": ">",
         "color": "#bb9af7",
@@ -138,7 +153,6 @@ class TerminalSession:
 
     def _is_valid_uuid(self, s: str) -> bool:
         """Check if string is valid UUID v4"""
-        import re
         if not s:
             return False
         pattern = r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
@@ -172,9 +186,14 @@ class TerminalSession:
             system_prompt_cmd = self.config.get("system_prompt_cmd")
             role_prompt = ROLE_PROMPTS.get(self.role)
             if system_prompt_cmd and role_prompt:
-                # Escape quotes in prompt
-                escaped_prompt = role_prompt.replace('"', '\\"').replace('\n', ' ')
-                cmd = f'{cmd} {system_prompt_cmd} "{escaped_prompt}"'
+                # Validate prompt - reject dangerous characters that could enable command injection
+                dangerous_chars = ['`', '$', '|', ';', '&', '>', '<', '\x00']
+                if any(char in role_prompt for char in dangerous_chars):
+                    print(f"[Terminal] Warning: Role prompt contains dangerous characters, skipping")
+                else:
+                    # Escape for Windows compatibility
+                    escaped_prompt = role_prompt.replace('"', '\\"').replace('\n', ' ').replace('\r', '')
+                    cmd = f'{cmd} {system_prompt_cmd} "{escaped_prompt}"'
 
             print(f"[Terminal] Starting: {cmd}")
             print(f"[Terminal] Working dir: {self.working_dir}")
@@ -200,7 +219,6 @@ class TerminalSession:
             return True
 
         except Exception as e:
-            import traceback
             print(f"[Terminal] Failed to start: {e}")
             traceback.print_exc()
             await websocket.send_json({
@@ -251,7 +269,7 @@ class TerminalSession:
         exit_code = None
         try:
             exit_code = self.pty.exitstatus if self.pty else None
-        except:
+        except Exception:
             pass
 
         print(f"[Terminal] Read loop ended for {self.session_id[:8]}..., total reads: {read_count}, exit_code: {exit_code}")
@@ -278,7 +296,7 @@ class TerminalSession:
                         "type": "terminal_output",
                         "data": f"\\x1b[36m  {self.config['command']}\\x1b[0m\\r\\n"
                     })
-            except:
+            except Exception:
                 pass
 
     async def write(self, data: str):
@@ -291,6 +309,9 @@ class TerminalSession:
         """Resize PTY"""
         if self.pty and self.pty.isalive():
             try:
+                # Validate and clamp rows/cols to prevent DoS or invalid values
+                rows = max(10, min(200, rows))
+                cols = max(20, min(400, cols))
                 self.pty.setwinsize(rows, cols)
             except Exception as e:
                 print(f"[Terminal] Resize error: {e}")
@@ -311,12 +332,46 @@ class TerminalSession:
             if "," in image_data:
                 image_data = image_data.split(",")[1]
 
-            image_bytes = base64.b64decode(image_data)
+            # Check base64 string length before decoding to prevent DoS
+            # Base64 is ~33% larger than binary, so 70MB base64 = ~50MB decoded
+            MAX_BASE64_SIZE = 70 * 1024 * 1024
+            if len(image_data) > MAX_BASE64_SIZE:
+                if self.websocket:
+                    await self.websocket.send_json({
+                        "type": "error",
+                        "message": "Image data too large (max ~50MB)"
+                    })
+                return None
 
-            # Save to temp file
+            # Base64 검증
+            try:
+                image_bytes = base64.b64decode(image_data, validate=True)
+            except Exception as e:
+                if self.websocket:
+                    await self.websocket.send_json({
+                        "type": "error",
+                        "message": f"Invalid image data: {e}"
+                    })
+                return None
+
+            # 크기 제한 (50MB)
+            if len(image_bytes) > 50 * 1024 * 1024:
+                if self.websocket:
+                    await self.websocket.send_json({
+                        "type": "error",
+                        "message": "Image too large (max 50MB)"
+                    })
+                return None
+
+            # Save to temp file (UUID 추가로 충돌 방지)
             ext = Path(filename).suffix or ".png"
+            # 지원 포맷 검증
+            allowed_exts = {'.png', '.jpg', '.jpeg', '.gif', '.webp'}
+            if ext.lower() not in allowed_exts:
+                ext = '.png'
             temp_dir = tempfile.gettempdir()
-            temp_path = os.path.join(temp_dir, f"ai_image_{self.session_id[:8]}{ext}")
+            unique_id = str(uuid.uuid4())[:8]
+            temp_path = os.path.join(temp_dir, f"ai_image_{self.session_id[:8]}_{unique_id}{ext}")
 
             with open(temp_path, "wb") as f:
                 f.write(image_bytes)
@@ -324,8 +379,8 @@ class TerminalSession:
             # Track temp file for cleanup (set이므로 중복 자동 무시)
             self._temp_files.add(temp_path)
 
-            # Send file path using agent's add command
-            cmd = add_cmd.format(path=temp_path) + "\n"
+            # Send file path using agent's add command (no Enter - let user press it)
+            cmd = add_cmd.format(path=temp_path) + " "
             await self.write(cmd)
 
             if self.websocket:
@@ -365,9 +420,13 @@ class TerminalSession:
                     self.pty.terminate(force=True)
                     # Extra: kill process tree on Windows
                     if os.name == 'nt':
-                        import subprocess
-                        subprocess.run(['taskkill', '/F', '/T', '/PID', str(pid)],
-                                      capture_output=True, timeout=5)
+                        try:
+                            subprocess.run(['taskkill', '/F', '/T', '/PID', str(pid)],
+                                          capture_output=True, timeout=5)
+                        except subprocess.TimeoutExpired:
+                            print(f"[Terminal] taskkill timeout for PID {pid}")
+                        except Exception as e:
+                            print(f"[Terminal] taskkill error: {e}")
             except Exception as e:
                 print(f"[Terminal] Stop error: {e}")
             self.pty = None

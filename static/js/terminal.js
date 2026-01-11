@@ -61,12 +61,32 @@ function createTerminal(type, role = 'General', id = null) {
             cursor: config.color,
             selection: 'rgba(122, 162, 247, 0.3)'
         },
-        allowProposedApi: true
+        allowProposedApi: true,
+        // Performance optimizations
+        scrollback: 5000,           // Limit scrollback buffer (default 1000)
+        fastScrollModifier: 'alt',  // Alt+scroll for fast scrolling
+        smoothScrollDuration: 0,    // Disable smooth scroll for performance
+        scrollSensitivity: 3        // Faster scroll response
     });
     
     const fitAddon = new FitAddon.FitAddon();
     term.loadAddon(fitAddon);
     term.loadAddon(new WebLinksAddon.WebLinksAddon());
+    
+    // GPU-accelerated rendering (WebGL)
+    let webglAddon = null;
+    try {
+        webglAddon = new WebglAddon.WebglAddon();
+        webglAddon.onContextLoss(() => {
+            webglAddon.dispose();
+            webglAddon = null;
+            console.warn('[Terminal] WebGL context lost, falling back to canvas');
+        });
+        term.loadAddon(webglAddon);
+        console.log('[Terminal] WebGL renderer enabled');
+    } catch (e) {
+        console.warn('[Terminal] WebGL not available, using canvas renderer:', e);
+    }
     
     const wrapper = cell.querySelector('.xterm-wrapper');
     term.open(wrapper);
@@ -145,6 +165,19 @@ function createTerminal(type, role = 'General', id = null) {
     });
     
     term.attachCustomKeyEventHandler((e) => {
+        // Ctrl+Shift+C: Copy selected text
+        if (e.ctrlKey && e.shiftKey && e.key === 'C') {
+            const selection = term.getSelection();
+            if (selection) {
+                navigator.clipboard.writeText(selection).then(() => {
+                    showToast('Copied to clipboard', 'success');
+                }).catch(() => {
+                    showToast('Failed to copy', 'error');
+                });
+            }
+            return false;
+        }
+        // Ctrl+V: Paste
         if (e.ctrlKey && e.key === 'v') {
             handlePaste(termObj);
             return false;

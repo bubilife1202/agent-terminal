@@ -140,6 +140,117 @@ function updateProjectEmptyState(path) {
     }
 }
 
+// --- Tab Drag & Drop ---
+let draggedTab = null;
+let dragOverTab = null;
+
+function handleTabDragStart(e) {
+    draggedTab = e.target.closest('.project-tab');
+    if (!draggedTab) return;
+    
+    draggedTab.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', draggedTab.dataset.path);
+    
+    // Create a subtle drag image
+    const ghost = draggedTab.cloneNode(true);
+    ghost.style.opacity = '0.8';
+    ghost.style.position = 'absolute';
+    ghost.style.top = '-1000px';
+    document.body.appendChild(ghost);
+    e.dataTransfer.setDragImage(ghost, 0, 0);
+    setTimeout(() => ghost.remove(), 0);
+}
+
+function handleTabDragOver(e) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    
+    const tab = e.target.closest('.project-tab');
+    if (!tab || tab === draggedTab) return;
+    
+    // Determine drop position (before or after)
+    const rect = tab.getBoundingClientRect();
+    const midX = rect.left + rect.width / 2;
+    const isAfter = e.clientX > midX;
+    
+    // Remove previous indicators
+    document.querySelectorAll('.project-tab').forEach(t => {
+        t.classList.remove('drag-over-left', 'drag-over-right');
+    });
+    
+    // Add indicator
+    tab.classList.add(isAfter ? 'drag-over-right' : 'drag-over-left');
+    dragOverTab = { tab, isAfter };
+}
+
+function handleTabDragLeave(e) {
+    const tab = e.target.closest('.project-tab');
+    if (tab) {
+        tab.classList.remove('drag-over-left', 'drag-over-right');
+    }
+}
+
+function handleTabDrop(e) {
+    e.preventDefault();
+    
+    if (!draggedTab || !dragOverTab) return;
+    
+    const fromPath = draggedTab.dataset.path;
+    const toTab = dragOverTab.tab;
+    const toPath = toTab.dataset.path;
+    const isAfter = dragOverTab.isAfter;
+    
+    if (fromPath === toPath) return;
+    
+    // Reorder projects in state
+    reorderProjects(fromPath, toPath, isAfter);
+    
+    // Cleanup
+    cleanupDrag();
+}
+
+function handleTabDragEnd(e) {
+    cleanupDrag();
+}
+
+function cleanupDrag() {
+    document.querySelectorAll('.project-tab').forEach(t => {
+        t.classList.remove('dragging', 'drag-over-left', 'drag-over-right');
+    });
+    draggedTab = null;
+    dragOverTab = null;
+}
+
+function reorderProjects(fromPath, toPath, insertAfter) {
+    const paths = Object.keys(state.projects);
+    const fromIndex = paths.indexOf(fromPath);
+    const toIndex = paths.indexOf(toPath);
+    
+    if (fromIndex === -1 || toIndex === -1) return;
+    
+    // Remove from current position
+    paths.splice(fromIndex, 1);
+    
+    // Calculate new position
+    let newIndex = paths.indexOf(toPath);
+    if (insertAfter) newIndex++;
+    
+    // Insert at new position
+    paths.splice(newIndex, 0, fromPath);
+    
+    // Rebuild projects object in new order
+    const newProjects = {};
+    paths.forEach(path => {
+        newProjects[path] = state.projects[path];
+    });
+    state.projects = newProjects;
+    
+    // Re-render and save
+    renderProjectTabs();
+    saveStateLater();
+}
+
 function renderProjectTabs() {
     const tabsContainer = document.getElementById('projectTabs');
     const paths = Object.keys(state.projects);
@@ -157,13 +268,26 @@ function renderProjectTabs() {
         const termCount = proj.terminals.length;
         const isActive = path === state.activeProject;
         return `
-            <div class="project-tab ${isActive ? 'active' : ''}" data-path="${escapedPath}" onclick="switchProject('${jsPath}')">
+            <div class="project-tab ${isActive ? 'active' : ''}" 
+                 data-path="${escapedPath}" 
+                 draggable="true"
+                 onclick="switchProject('${jsPath}')">
+                <span class="tab-drag-handle">⠿</span>
                 <span class="tab-name" title="${escapedPath}">${name}</span>
                 ${termCount > 0 ? `<span class="terminal-count">${termCount}</span>` : ''}
                 <span class="tab-close" onclick="event.stopPropagation(); closeProject('${jsPath}')">✕</span>
             </div>
         `;
     }).join('');
+    
+    // Attach drag event listeners
+    tabsContainer.querySelectorAll('.project-tab').forEach(tab => {
+        tab.addEventListener('dragstart', handleTabDragStart);
+        tab.addEventListener('dragover', handleTabDragOver);
+        tab.addEventListener('dragleave', handleTabDragLeave);
+        tab.addEventListener('drop', handleTabDrop);
+        tab.addEventListener('dragend', handleTabDragEnd);
+    });
 }
 
 // --- Agent UI ---

@@ -7,7 +7,7 @@ Features:
 3. Inter-Agent Communication Message Bus
 """
 
-__version__ = "1.1.3"
+__version__ = "1.2.2"
 
 import os
 import sys
@@ -381,6 +381,25 @@ HTML_CONTENT = """
         .file-item .file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .file-item .file-actions { display: none; gap: 2px; }
         .file-item:hover .file-actions { display: flex; }
+
+        /* Project Tabs Bar - 멀티 프로젝트 지원 */
+        .project-tabs-bar { height: 28px; background: var(--bg); border-bottom: 1px solid var(--border); display: flex; align-items: stretch; padding: 0 4px; gap: 2px; overflow-x: auto; flex-shrink: 0; }
+        .project-tabs-bar::-webkit-scrollbar { display: none; }
+        .project-tabs-bar:empty { display: none; }
+        .project-tab { display: flex; align-items: center; gap: 6px; padding: 0 10px; margin-top: 4px; background: #1a1d24; color: #888; border: 1px solid var(--border); border-bottom: none; border-radius: 6px 6px 0 0; cursor: pointer; font-size: 11px; white-space: nowrap; max-width: 180px; transition: all 0.15s; }
+        .project-tab:hover { background: #252a35; color: #bbb; }
+        .project-tab.active { background: #000; color: var(--text); border-color: var(--accent); border-bottom: 1px solid #000; margin-bottom: -1px; z-index: 1; }
+        .project-tab .tab-name { overflow: hidden; text-overflow: ellipsis; flex: 1; }
+        .project-tab .tab-count { background: var(--accent); color: white; font-size: 9px; padding: 1px 5px; border-radius: 8px; font-weight: bold; }
+        .project-tab .tab-close { background: none; border: none; color: #666; cursor: pointer; padding: 0 2px; font-size: 14px; line-height: 1; opacity: 0; transition: opacity 0.15s; }
+        .project-tab:hover .tab-close { opacity: 0.7; }
+        .project-tab .tab-close:hover { opacity: 1; color: #e06c75; }
+        .add-project-btn { background: transparent; border: 1px dashed #444; color: #666; width: 24px; margin: 4px 0; border-radius: 4px; cursor: pointer; font-size: 14px; display: flex; align-items: center; justify-content: center; }
+        .add-project-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+        /* Project Grid visibility */
+        .project-grid { display: none; width: 100%; height: 100%; }
+        .project-grid.active { display: grid; }
     </style>
 </head>
 <body>
@@ -465,7 +484,13 @@ HTML_CONTENT = """
         </aside>
 
         <div class="terminal-area">
-            <div id="grid" class="grid cols-1"></div>
+            <div class="project-tabs-bar" id="projectTabsBar">
+                <!-- 동적으로 프로젝트 탭 생성 -->
+                <button class="add-project-btn" onclick="openFolderModal()" title="새 프로젝트 추가">+</button>
+            </div>
+            <div id="gridsContainer" style="flex:1; display:flex; min-height:0;">
+                <!-- 프로젝트별 grid가 여기에 동적 생성됨 -->
+            </div>
         </div>
     </div>
 
@@ -534,19 +559,34 @@ HTML_CONTENT = """
             shell:    { icon: '⚪', name: 'Shell',    color: '#a9b1d6', multiInstance: true }
         };
 
-        // ========== State ==========
-        let terminals = [];
-        let workDir = null;
-        let layoutCols = 1;
+        // ========== State (Multi-Project) ==========
+        // 멀티 프로젝트 지원: 프로젝트별 터미널 분리
+        const MAX_OPEN_PROJECTS = 5;
+        let projects = {};  // { hash: { path, terminals[], layoutCols, gridEl } }
+        let activeProjectHash = null;  // 현재 보이는 프로젝트
+
+        // 하위 호환성을 위한 getter
+        function getActiveTerminals() {
+            if (!activeProjectHash || !projects[activeProjectHash]) return [];
+            return projects[activeProjectHash].terminals;
+        }
+        function getWorkDir() {
+            if (!activeProjectHash || !projects[activeProjectHash]) return null;
+            return projects[activeProjectHash].path;
+        }
+        function getAllTerminals() {
+            return Object.values(projects).flatMap(p => p.terminals);
+        }
+
+        // 기타 상태
         let browsingPath = 'drives';
         let parentPath = null;
-        let serverStatus = 'disconnected'; // 'connected', 'reconnecting', 'disconnected'
+        let serverStatus = 'disconnected';
         let healthCheckInterval = null;
 
-        // 프로젝트 리스트
-        let favorites = [];  // 즐겨찾기
-        let recentProjects = [];  // 최근 프로젝트 (최대 10개)
-        let currentProjectHash = null;  // 현재 프로젝트 해시
+        // 프로젝트 리스트 (즐겨찾기/최근)
+        let favorites = [];
+        let recentProjects = [];
 
         // ========== Project Hash & Storage ==========
         function hashPath(path) {
@@ -600,10 +640,10 @@ HTML_CONTENT = """
                 if (res.ok) {
                     if (serverStatus !== 'connected') {
                         updateServerStatus('connected', '연결됨');
-                        // 서버 재연결 시 터미널 재연결
-                        // ONLY reconnect if websocket is CLOSED (not CONNECTING or OPEN)
-                        if (terminals.length > 0) {
-                            terminals.forEach(t => {
+                        // 서버 재연결 시 모든 프로젝트의 터미널 재연결
+                        const allTerminals = getAllTerminals();
+                        if (allTerminals.length > 0) {
+                            allTerminals.forEach(t => {
                                 if (!t.ws || t.ws.readyState === WebSocket.CLOSED) {
                                     console.log(`[HealthCheck] Reconnecting terminal ${t.id}`);
                                     t.connect();
@@ -701,21 +741,26 @@ HTML_CONTENT = """
         }
 
         function renderProjectLists() {
+            const currentPath = getWorkDir();
             // 즐겨찾기 렌더링
             const favList = document.getElementById('favoritesList');
             if (favList) {
                 if (favorites.length === 0) {
                     favList.innerHTML = '<div style="padding:8px 10px;color:#5c6370;font-size:10px;">즐겨찾기가 없습니다</div>';
                 } else {
-                    favList.innerHTML = favorites.map(path => `
-                        <div class="project-item ${path === workDir ? 'active' : ''}" onclick="openProject('${path.replace(/\\\\/g, '\\\\\\\\')}')">
-                            <span class="icon">⭐</span>
+                    favList.innerHTML = favorites.map(path => {
+                        const hash = hashPath(path);
+                        const isOpen = !!projects[hash];
+                        const isActive = path === currentPath;
+                        return `
+                        <div class="project-item ${isActive ? 'active' : ''}" onclick="openProject('${path.replace(/\\\\/g, '\\\\\\\\')}')">
+                            <span class="icon">${isOpen ? '📂' : '⭐'}</span>
                             <span class="name" title="${path}">${getProjectName(path)}</span>
                             <div class="actions">
                                 <button class="action-btn" onclick="event.stopPropagation();toggleFavorite('${path.replace(/\\\\/g, '\\\\\\\\')}')" title="즐겨찾기 해제">✕</button>
                             </div>
                         </div>
-                    `).join('');
+                    `}).join('');
                 }
             }
 
@@ -725,48 +770,175 @@ HTML_CONTENT = """
                 if (recentProjects.length === 0) {
                     recentList.innerHTML = '<div style="padding:8px 10px;color:#5c6370;font-size:10px;">최근 프로젝트가 없습니다</div>';
                 } else {
-                    recentList.innerHTML = recentProjects.map(path => `
-                        <div class="project-item ${path === workDir ? 'active' : ''}" onclick="openProject('${path.replace(/\\\\/g, '\\\\\\\\')}')">
-                            <span class="icon">${isFavorite(path) ? '⭐' : '📁'}</span>
+                    recentList.innerHTML = recentProjects.map(path => {
+                        const hash = hashPath(path);
+                        const isOpen = !!projects[hash];
+                        const isActive = path === currentPath;
+                        return `
+                        <div class="project-item ${isActive ? 'active' : ''}" onclick="openProject('${path.replace(/\\\\/g, '\\\\\\\\')}')">
+                            <span class="icon">${isOpen ? '📂' : (isFavorite(path) ? '⭐' : '📁')}</span>
                             <span class="name" title="${path}">${getProjectName(path)}</span>
                             <div class="actions">
                                 <button class="action-btn" onclick="event.stopPropagation();toggleFavorite('${path.replace(/\\\\/g, '\\\\\\\\')}')" title="${isFavorite(path) ? '즐겨찾기 해제' : '즐겨찾기 추가'}">${isFavorite(path) ? '★' : '☆'}</button>
                                 <button class="action-btn" onclick="event.stopPropagation();removeFromRecent('${path.replace(/\\\\/g, '\\\\\\\\')}')" title="목록에서 제거">✕</button>
                             </div>
                         </div>
-                    `).join('');
+                    `}).join('');
                 }
             }
         }
 
+        // ========== Project Tab UI ==========
+        function renderProjectTabs() {
+            const tabsBar = document.getElementById('projectTabsBar');
+            const addBtn = tabsBar.querySelector('.add-project-btn');
+
+            // 기존 탭 제거 (+ 버튼 제외)
+            tabsBar.querySelectorAll('.project-tab').forEach(t => t.remove());
+
+            // 프로젝트 탭 생성
+            Object.values(projects).forEach(project => {
+                const tab = document.createElement('div');
+                tab.className = `project-tab ${project.hash === activeProjectHash ? 'active' : ''}`;
+                tab.dataset.projectHash = project.hash;
+                tab.onclick = () => switchProject(project.hash);
+                tab.innerHTML = `
+                    <span class="tab-name" title="${project.path}">${getProjectName(project.path)}</span>
+                    <span class="tab-count">${project.terminals.length}</span>
+                    <button class="tab-close" onclick="event.stopPropagation();closeProject('${project.hash}')">&times;</button>
+                `;
+                tabsBar.insertBefore(tab, addBtn);
+            });
+        }
+
+        function createProjectGrid(projectHash, layoutCols = 1) {
+            const container = document.getElementById('gridsContainer');
+            const grid = document.createElement('div');
+            grid.id = `grid-${projectHash}`;
+            grid.className = `grid cols-${layoutCols} project-grid`;
+            grid.dataset.projectHash = projectHash;
+            container.appendChild(grid);
+            return grid;
+        }
+
+        // ========== Multi-Project Functions ==========
         function openProject(path, skipRestore = false) {
-            // 기존 터미널 정리
-            terminals.forEach(t => t.dispose());
-            terminals = [];
-            document.getElementById('grid').innerHTML = '';
+            const projectHash = hashPath(path);
+            console.log(`[OpenProject] ${path} -> hash: ${projectHash}`);
 
-            // 프로젝트 해시 설정 및 URL 업데이트
-            currentProjectHash = hashPath(path);
-            updateUrlWithProject(currentProjectHash);
-            console.log(`[OpenProject] ${path} -> hash: ${currentProjectHash}`);
+            // 이미 열린 프로젝트면 전환만
+            if (projects[projectHash]) {
+                switchProject(projectHash);
+                return;
+            }
 
-            workDir = path;
-            document.getElementById('workDirDisplay').textContent = workDir;
-            loadFileTree(workDir);
+            // 최대 프로젝트 수 체크
+            if (Object.keys(projects).length >= MAX_OPEN_PROJECTS) {
+                showToast(`최대 ${MAX_OPEN_PROJECTS}개 프로젝트만 동시에 열 수 있습니다`, 'warning');
+                return;
+            }
+
+            // 새 프로젝트 생성
+            const gridEl = createProjectGrid(projectHash);
+            projects[projectHash] = {
+                hash: projectHash,
+                path: path,
+                terminals: [],
+                layoutCols: 1,
+                gridEl: gridEl
+            };
+
+            // 탭 렌더링 및 전환
+            renderProjectTabs();
+            switchProject(projectHash);
             addToRecent(path);
 
             // 저장된 상태 복원 시도
             if (!skipRestore) {
-                const restored = restoreSession(currentProjectHash);
+                const restored = restoreProjectSession(projectHash);
                 if (restored) {
                     showToast(`프로젝트 복원됨: ${getProjectName(path)}`, 'success');
                     return;
                 }
             }
 
-            // 복원 실패 또는 skipRestore면 에이전트 선택
+            // 복원 실패면 에이전트 선택
             openAgentSelectModal();
             showToast(`프로젝트 열림: ${getProjectName(path)}`, 'success');
+        }
+
+        function switchProject(projectHash) {
+            if (!projects[projectHash]) return;
+
+            // 현재 프로젝트 숨기기
+            if (activeProjectHash && projects[activeProjectHash]) {
+                const oldGrid = projects[activeProjectHash].gridEl;
+                if (oldGrid) oldGrid.classList.remove('active');
+            }
+
+            // 새 프로젝트 표시
+            activeProjectHash = projectHash;
+            const project = projects[projectHash];
+            project.gridEl.classList.add('active');
+
+            // UI 업데이트
+            document.getElementById('workDirDisplay').textContent = project.path;
+            loadFileTree(project.path);
+            updateUrlWithProject(projectHash);
+            updateLayoutButtons(project.layoutCols);
+
+            // 탭 상태 업데이트
+            document.querySelectorAll('.project-tab').forEach(tab => {
+                tab.classList.toggle('active', tab.dataset.projectHash === projectHash);
+            });
+
+            // 터미널 fit
+            setTimeout(() => {
+                project.terminals.forEach(t => t.fitAddon?.fit());
+            }, 100);
+
+            renderProjectLists();
+            console.log(`[SwitchProject] -> ${getProjectName(project.path)}`);
+        }
+
+        function closeProject(projectHash) {
+            const project = projects[projectHash];
+            if (!project) return;
+
+            // 터미널 dispose
+            project.terminals.forEach(t => t.dispose());
+
+            // Grid 제거
+            project.gridEl.remove();
+
+            // localStorage에서 제거
+            localStorage.removeItem(getSessionKey(projectHash));
+
+            // 프로젝트 목록에서 제거
+            delete projects[projectHash];
+
+            console.log(`[CloseProject] ${getProjectName(project.path)}`);
+
+            // 다른 프로젝트로 전환 또는 폴더 선택 모달
+            const remaining = Object.keys(projects);
+            if (remaining.length > 0) {
+                switchProject(remaining[0]);
+            } else {
+                activeProjectHash = null;
+                document.getElementById('workDirDisplay').textContent = '폴더를 선택하세요...';
+                document.getElementById('fileTree').innerHTML = '';
+                setTimeout(openFolderModal, 300);
+            }
+
+            renderProjectTabs();
+            renderProjectLists();
+            saveOpenProjectsList();
+        }
+
+        function updateLayoutButtons(cols) {
+            document.querySelectorAll('.layout-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.layout == cols);
+            });
         }
 
         function toggleSection(section) {
@@ -818,23 +990,46 @@ HTML_CONTENT = """
             setTimeout(() => toast.remove(), 3000);
         }
 
-        // ========== Session Persistence ==========
+        // ========== Session Persistence (Multi-Project) ==========
         function saveState() {
-            if (!currentProjectHash) return;  // 프로젝트 선택 전에는 저장 안함
+            if (!activeProjectHash || !projects[activeProjectHash]) return;
+            const project = projects[activeProjectHash];
             const state = {
-                workDir: workDir || null,
-                layoutCols,
-                terminals: terminals.map(t => ({
+                workDir: project.path,
+                layoutCols: project.layoutCols,
+                terminals: project.terminals.map(t => ({
                     id: t.id,
                     type: t.type,
                     role: t.role,
                     sessionId: t.sessionId,
-                    targetId: t.targetId || null  // 라우팅 대상 저장
+                    targetId: t.targetId || null
                 }))
             };
-            const key = getSessionKey(currentProjectHash);
+            const key = getSessionKey(activeProjectHash);
             localStorage.setItem(key, JSON.stringify(state));
-            console.log(`[SaveState] 저장됨 (${key}):`, state);
+            console.log(`[SaveState] 저장됨 (${key})`);
+            saveOpenProjectsList();
+        }
+
+        function saveOpenProjectsList() {
+            const openList = Object.values(projects).map(p => ({
+                hash: p.hash,
+                path: p.path
+            }));
+            localStorage.setItem('agent-terminal-open-projects', JSON.stringify({
+                projects: openList,
+                activeHash: activeProjectHash
+            }));
+        }
+
+        function loadOpenProjectsList() {
+            try {
+                const raw = localStorage.getItem('agent-terminal-open-projects');
+                if (!raw) return null;
+                return JSON.parse(raw);
+            } catch(e) {
+                return null;
+            }
         }
 
         function loadState(projectHash) {
@@ -843,7 +1038,7 @@ HTML_CONTENT = """
                 const raw = localStorage.getItem(key);
                 if (!raw) return null;
                 const state = JSON.parse(raw);
-                console.log(`[LoadState] 로드됨 (${key}):`, state);
+                console.log(`[LoadState] 로드됨 (${key})`);
                 return state;
             } catch(e) {
                 console.error('[LoadState] 오류:', e);
@@ -851,50 +1046,38 @@ HTML_CONTENT = """
             }
         }
 
-        function restoreSession(projectHash) {
-            console.log(`[RestoreSession] 시작 (project: ${projectHash})`);
+        function restoreProjectSession(projectHash) {
+            console.log(`[RestoreProjectSession] 시작 (project: ${projectHash})`);
             const state = loadState(projectHash);
+            const project = projects[projectHash];
 
-            if (!state) {
-                console.log('[RestoreSession] 저장된 상태 없음');
+            if (!state || !project) {
+                console.log('[RestoreProjectSession] 저장된 상태 없음');
                 return false;
             }
 
-            // 프로젝트 해시 설정
-            currentProjectHash = projectHash;
-            updateUrlWithProject(projectHash);
-
-            // workDir 복원 (없어도 터미널 구조는 복원)
-            if (state.workDir) {
-                workDir = state.workDir;
-                document.getElementById('workDirDisplay').textContent = workDir;
-                loadFileTree(workDir);
+            // 레이아웃 복원
+            project.layoutCols = state.layoutCols || 1;
+            const isActive = projectHash === activeProjectHash;
+            project.gridEl.className = `grid cols-${project.layoutCols} project-grid${isActive ? ' active' : ''}`;
+            if (isActive) {
+                updateLayoutButtons(project.layoutCols);
             }
 
-            // 레이아웃 복원
-            layoutCols = state.layoutCols || 1;
-            document.getElementById('grid').className = `grid cols-${layoutCols}`;
-            // Update layout buttons
-            document.querySelectorAll('.layout-btn').forEach(btn => {
-                btn.classList.toggle('active', btn.dataset.layout == layoutCols);
-            });
-
-            // 터미널 복원
+            // 터미널 복원 (명시적으로 projectHash 전달)
             if (state.terminals && state.terminals.length > 0) {
-                console.log(`[RestoreSession] ${state.terminals.length}개 터미널 복원 시작`);
+                console.log(`[RestoreProjectSession] ${state.terminals.length}개 터미널 복원 (project: ${projectHash})`);
                 state.terminals.forEach((saved, idx) => {
-                    // 세션 ID 마이그레이션 (UUID가 아니면 새로 생성)
                     const migratedSessionId = migrateSessionId(saved.sessionId);
-                    console.log(`[RestoreSession] 터미널 ${idx + 1} 생성:`, { ...saved, sessionId: migratedSessionId });
-                    createTerminal(saved.type, saved.role, saved.id, migratedSessionId, saved.targetId);
+                    createTerminal(saved.type, saved.role, saved.id, migratedSessionId, saved.targetId, projectHash);
                 });
 
-                // 라우팅 옵션 새로고침 및 라우팅 대상 복원
+                // 라우팅 복원
                 setTimeout(() => {
                     refreshRouterOptions();
                     state.terminals.forEach(saved => {
                         if (saved.targetId) {
-                            const t = terminals.find(x => x.id === saved.id);
+                            const t = project.terminals.find(x => x.id === saved.id);
                             if (t) {
                                 t.targetId = saved.targetId;
                                 const select = t.el.querySelector(`[data-router-for="${t.id}"]`);
@@ -904,12 +1087,10 @@ HTML_CONTENT = """
                     });
                 }, 100);
 
-                showToast(`세션 복원됨: ${state.terminals.length}개 터미널`, 'success');
+                renderProjectTabs();
                 return true;
-            } else {
-                console.log('[RestoreSession] 저장된 터미널 없음');
-                return false;
             }
+            return false;
         }
 
         // ========== Agent Select Modal ==========
@@ -945,6 +1126,7 @@ HTML_CONTENT = """
         function confirmAgentSelect() {
             const role = document.getElementById('agentSelectRole').value;
             const cfg = AGENT_CONFIG[selectedAgentType];
+            const terminals = getActiveTerminals();
 
             // 단일 인스턴스 에이전트 중복 체크
             if (!cfg.multiInstance) {
@@ -1067,9 +1249,9 @@ HTML_CONTENT = """
 
         function sendFileToTerminal(filePath) {
             // 활성 터미널에 파일 경로 전달
+            const terminals = getActiveTerminals();
             const activeTerminal = terminals.find(t => t.ws?.readyState === WebSocket.OPEN);
             if (activeTerminal) {
-                // 파일 경로를 터미널에 입력으로 전달
                 const fileName = filePath.split(/[\\\\/]/).pop();
                 activeTerminal.ws.send(JSON.stringify({
                     type: 'input',
@@ -1090,41 +1272,63 @@ HTML_CONTENT = """
         }
 
         function setLayout(n) {
-            layoutCols = parseInt(n);
-            document.getElementById('grid').className = `grid cols-${n}`;
-            // Update active button
-            document.querySelectorAll('.layout-btn').forEach(btn => {
-                btn.classList.toggle('active', btn.dataset.layout == n);
-            });
+            if (!activeProjectHash || !projects[activeProjectHash]) return;
+            const project = projects[activeProjectHash];
+            project.layoutCols = parseInt(n);
+            project.gridEl.className = `grid cols-${n} project-grid active`;
+            updateLayoutButtons(n);
             setTimeout(fitAll, 100);
             saveState();
         }
 
+        // 터미널 개수에 따른 레이아웃 & 버튼 자동 동기화
+        function autoUpdateLayout() {
+            if (!activeProjectHash || !projects[activeProjectHash]) return;
+            const n = projects[activeProjectHash].terminals.length;
+            let layout;
+            if (n === 1) {
+                layout = 1;  // 전체 화면
+            } else if (n === 2) {
+                layout = 2;  // 가로 2분할
+            } else if (n <= 4) {
+                layout = 4;  // 2x2 그리드
+            } else {
+                layout = 6;  // 3x2 그리드
+            }
+            setLayout(layout);
+        }
+
         // ========== Terminal Class ==========
         class AgentTerminal {
-            constructor(type, role, id, sessionId) {
+            constructor(type, role, id, sessionId, projectHash = null) {
                 this.id = id || generateId();
                 this.type = type;
                 this.role = role;
-                // Unique sessionId per terminal - never changes
-                // Use UUID for CLI session (required by Claude --session-id)
+                // 명시적으로 전달된 projectHash 사용, 없으면 activeProjectHash 폴백
+                this.projectHash = projectHash || activeProjectHash;
                 this.sessionId = sessionId || generateUUID();
                 this.ws = null;
                 this.term = null;
                 this.fitAddon = null;
+                this.resizeObserver = null;  // ResizeObserver 인스턴스 저장
 
                 this.el = document.createElement('div');
                 this.el.className = 'cell';
                 this.el.dataset.terminalId = this.id;
                 this.render();
 
-                document.getElementById('grid').appendChild(this.el);
+                // 프로젝트 grid에 추가 (명시적 projectHash 사용)
+                const project = projects[this.projectHash];
+                if (project && project.gridEl) {
+                    project.gridEl.appendChild(this.el);
+                }
                 this.initXterm();
             }
 
             render() {
                 const cfg = AGENT_CONFIG[this.type] || AGENT_CONFIG.shell;
-                const termNum = terminals.indexOf(this) + 1;
+                const terminals = getActiveTerminals();
+                const termNum = terminals.indexOf(this) + 1 || terminals.length + 1;
                 this.el.innerHTML = `
                     <div class="cell-toolbar" style="border-left: 3px solid ${cfg.color};">
                         <span class="term-number" style="color: ${cfg.color}; font-weight: bold; margin-right: 4px;">#${termNum}</span>
@@ -1200,9 +1404,9 @@ HTML_CONTENT = """
                     return true;
                 });
 
-                // Resize observer with debounce
+                // Resize observer with debounce (저장하여 dispose 시 해제)
                 let resizeTimeout = null;
-                new ResizeObserver(() => {
+                this.resizeObserver = new ResizeObserver(() => {
                     this.fitAddon?.fit();
                     // Debounce resize events to prevent duplicate Claude UI renders
                     if (resizeTimeout) clearTimeout(resizeTimeout);
@@ -1215,9 +1419,10 @@ HTML_CONTENT = """
                             }));
                         }
                     }, 200);
-                }).observe(container);
+                });
+                this.resizeObserver.observe(container);
 
-                if (workDir) this.connect();
+                if (getWorkDir()) this.connect();
             }
 
             async handlePaste() {
@@ -1263,9 +1468,14 @@ HTML_CONTENT = """
                     return;
                 }
                 if (this.ws) this.ws.close();
+
+                // 터미널이 속한 프로젝트의 workDir 사용
+                const project = projects[this.projectHash];
+                const workDir = project ? project.path : getWorkDir();
                 if (!workDir) return;
 
                 const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const terminals = project ? project.terminals : getActiveTerminals();
                 const idx = terminals.indexOf(this);
                 const cfg = AGENT_CONFIG[this.type] || AGENT_CONFIG.shell;
 
@@ -1425,6 +1635,7 @@ HTML_CONTENT = """
 
             routeTo(targetId) {
                 this.targetId = targetId || null;
+                const terminals = getActiveTerminals();
                 if (targetId) {
                     const target = terminals.find(t => t.id === targetId);
                     if (target) {
@@ -1439,6 +1650,7 @@ HTML_CONTENT = """
             }
 
             sendToTarget(data) {
+                const terminals = getActiveTerminals();
                 const target = terminals.find(t => t.id === this.targetId);
                 if (target?.ws?.readyState === WebSocket.OPEN) {
                     const cfg = AGENT_CONFIG[this.type] || AGENT_CONFIG.shell;
@@ -1453,6 +1665,8 @@ HTML_CONTENT = """
             dispose() {
                 this.disposed = true;
                 if (this.reconnectTimeout) clearTimeout(this.reconnectTimeout);
+                if (this.stableConnectionTimer) clearTimeout(this.stableConnectionTimer);
+                if (this.resizeObserver) this.resizeObserver.disconnect();
                 if (this.ws) this.ws.close();
                 if (this.term) this.term.dispose();
             }
@@ -1462,6 +1676,7 @@ HTML_CONTENT = """
         let maximizedTerminalId = null;
 
         function toggleMaximize(terminalId) {
+            const terminals = getActiveTerminals();
             const t = terminals.find(t => t.id === terminalId);
             if (!t) return;
 
@@ -1497,26 +1712,33 @@ HTML_CONTENT = """
         }
 
         // ========== Terminal Management ==========
-        function createTerminal(type, role, id, sessionId, targetId = null) {
-            const t = new AgentTerminal(type, role, id, sessionId);
+        function createTerminal(type, role, id, sessionId, targetId = null, projectHash = null) {
+            // projectHash가 명시되지 않으면 activeProjectHash 사용
+            const targetProjectHash = projectHash || activeProjectHash;
+            const t = new AgentTerminal(type, role, id, sessionId, targetProjectHash);
             if (targetId) t.targetId = targetId;
-            terminals.push(t);
+            // 해당 프로젝트에 터미널 추가
+            if (targetProjectHash && projects[targetProjectHash]) {
+                projects[targetProjectHash].terminals.push(t);
+            }
             refreshRouterOptions();
+            renderProjectTabs();  // 탭 카운트 업데이트
             return t;
         }
 
         function addAgent() {
-            if (!workDir) {
+            if (!getWorkDir()) {
                 openFolderModal();
                 showToast('먼저 작업 폴더를 선택해주세요', 'warning');
                 return;
             }
+            const terminals = getActiveTerminals();
             if (terminals.length >= 6) {
                 showToast('최대 6개의 터미널까지만 가능합니다', 'warning');
                 return;
             }
             const type = document.getElementById('newAgentType').value;
-            const role = 'General';  // 역할은 터미널별로 변경 가능
+            const role = 'General';
             const cfg = AGENT_CONFIG[type];
 
             // 단일 인스턴스 에이전트 중복 체크
@@ -1529,34 +1751,38 @@ HTML_CONTENT = """
             }
 
             createTerminal(type, role);
-            saveState();
+            autoUpdateLayout();  // 터미널 개수에 맞게 레이아웃 자동 동기화
             showToast(`${cfg.icon} ${cfg.name} (${role}) 터미널 추가됨`, 'success');
         }
 
         function removeAgent(terminalId) {
-            if (terminals.length <= 1) {
+            if (!activeProjectHash || !projects[activeProjectHash]) return;
+            const project = projects[activeProjectHash];
+
+            if (project.terminals.length <= 1) {
                 showToast('최소 1개의 터미널은 유지해야 합니다', 'warning');
                 return;
             }
 
-            const idx = terminals.findIndex(t => t.id === terminalId);
+            const idx = project.terminals.findIndex(t => t.id === terminalId);
             if (idx === -1) return;
 
-            terminals[idx].dispose();
-            terminals.splice(idx, 1);
+            project.terminals[idx].dispose();
+            project.terminals.splice(idx, 1);
 
             const el = document.querySelector(`[data-terminal-id="${terminalId}"]`);
             if (el) el.remove();
 
             refreshRouterOptions();
-            saveState();
+            renderProjectTabs();  // 탭 카운트 업데이트
+            autoUpdateLayout();  // 터미널 개수에 맞게 레이아웃 자동 동기화
             fitAll();
         }
 
         function restartTerminal(terminalId) {
+            const terminals = getActiveTerminals();
             const t = terminals.find(t => t.id === terminalId);
             if (t) {
-                // Reset retry counter on manual reconnect
                 t.reconnectAttempts = 0;
                 t.term?.write('\\r\\n\\x1b[33m[수동 재연결...]\\x1b[0m\\r\\n');
                 t.connect();
@@ -1564,6 +1790,7 @@ HTML_CONTENT = """
         }
 
         function refreshRouterOptions() {
+            const terminals = getActiveTerminals();
             terminals.forEach(t => {
                 const select = t.el.querySelector(`[data-router-for="${t.id}"]`);
                 if (!select) return;
@@ -1583,43 +1810,39 @@ HTML_CONTENT = """
         }
 
         function fitAll() {
-            terminals.forEach(t => t.fitAddon?.fit());
+            getActiveTerminals().forEach(t => t.fitAddon?.fit());
         }
 
         // ========== Clear Sessions ==========
         function clearAllSessions() {
-            if (!confirm('모든 세션을 초기화할까요?\\n터미널 구성과 프로젝트 목록이 삭제됩니다.')) return;
+            if (!confirm('모든 세션을 초기화할까요?\\n모든 프로젝트와 터미널이 삭제됩니다.')) return;
 
-            // 모든 터미널 종료
-            terminals.forEach(t => t.dispose());
-            terminals = [];
+            // 모든 프로젝트의 터미널 종료
+            Object.values(projects).forEach(project => {
+                project.terminals.forEach(t => t.dispose());
+                project.gridEl.remove();
+                localStorage.removeItem(getSessionKey(project.hash));
+            });
+            projects = {};
 
-            // Grid 초기화
-            document.getElementById('grid').innerHTML = '';
-
-            // localStorage 초기화 (현재 프로젝트 + 프로젝트 목록)
-            if (currentProjectHash) {
-                localStorage.removeItem(getSessionKey(currentProjectHash));
-            }
+            // 프로젝트 목록 초기화
+            localStorage.removeItem('agent-terminal-open-projects');
             localStorage.removeItem(PROJECTS_KEY);
 
-            // URL에서 프로젝트 파라미터 제거
-            currentProjectHash = null;
-            updateUrlWithProject(null);
-
             // 상태 초기화
-            workDir = null;
+            activeProjectHash = null;
+            updateUrlWithProject(null);
             favorites = [];
             recentProjects = [];
 
             // UI 초기화
+            document.getElementById('gridsContainer').innerHTML = '';
             document.getElementById('workDirDisplay').textContent = '폴더를 선택하세요...';
             document.getElementById('fileTree').innerHTML = '';
             renderProjectLists();
+            renderProjectTabs();
 
             showToast('모든 세션이 초기화되었습니다', 'success');
-
-            // 폴더 선택 모달 표시
             setTimeout(openFolderModal, 300);
         }
 
@@ -1627,19 +1850,29 @@ HTML_CONTENT = """
         async function restartServer() {
             if (!confirm('서버를 재시작할까요?\\n모든 연결이 끊어집니다.\\n(터미널 구성은 유지됩니다)')) return;
 
-            // 현재 상태 저장
-            saveState();
-            console.log('[RestartServer] 상태 저장 완료');
+            // 모든 프로젝트 상태 저장
+            Object.keys(projects).forEach(hash => {
+                const project = projects[hash];
+                const state = {
+                    workDir: project.path,
+                    layoutCols: project.layoutCols,
+                    terminals: project.terminals.map(t => ({
+                        id: t.id, type: t.type, role: t.role,
+                        sessionId: t.sessionId, targetId: t.targetId || null
+                    }))
+                };
+                localStorage.setItem(getSessionKey(hash), JSON.stringify(state));
+            });
+            saveOpenProjectsList();
+            console.log('[RestartServer] 모든 프로젝트 상태 저장 완료');
 
             updateServerStatus('reconnecting', '재시작 중...');
             showToast('서버 재시작 중... 잠시 후 자동 복원됩니다', 'warning');
 
-            terminals.forEach(t => t.term?.write('\\r\\n\\x1b[33m[서버 재시작 중... 자동으로 복원됩니다]\\x1b[0m\\r\\n'));
+            getAllTerminals().forEach(t => t.term?.write('\\r\\n\\x1b[33m[서버 재시작 중... 자동으로 복원됩니다]\\x1b[0m\\r\\n'));
 
             try {
                 await fetch('/api/restart', { method: 'POST' });
-                // 서버가 재시작되면 health check가 자동으로 재연결 시도
-                // 3초 후 페이지 새로고침
                 setTimeout(() => {
                     console.log('[RestartServer] 페이지 새로고침');
                     location.reload();
@@ -1654,42 +1887,98 @@ HTML_CONTENT = """
         // ========== Init ==========
         window.onresize = () => setTimeout(fitAll, 100);
         window.onbeforeunload = () => {
-            console.log('[Unload] 상태 저장');
-            saveState();
+            console.log('[Unload] 모든 프로젝트 상태 저장');
+            Object.keys(projects).forEach(hash => {
+                const project = projects[hash];
+                const state = {
+                    workDir: project.path,
+                    layoutCols: project.layoutCols,
+                    terminals: project.terminals.map(t => ({
+                        id: t.id, type: t.type, role: t.role,
+                        sessionId: t.sessionId, targetId: t.targetId || null
+                    }))
+                };
+                localStorage.setItem(getSessionKey(hash), JSON.stringify(state));
+            });
+            saveOpenProjectsList();
         };
 
         document.addEventListener('DOMContentLoaded', () => {
-            console.log('[Init] 페이지 로드됨');
+            console.log('[Init] 멀티 프로젝트 모드 시작');
 
-            // 버전 정보 가져오기
             fetchVersion();
-
-            // 서버 상태 체크 시작
             startHealthCheck();
-
-            // 프로젝트 리스트 로드
             loadProjects();
 
-            // URL에서 프로젝트 해시 확인, 없으면 마지막 프로젝트 사용
-            let projectHash = getProjectFromUrl() || getLastProject();
+            // 저장된 열린 프로젝트들 복원
+            const openData = loadOpenProjectsList();
             let restored = false;
 
-            if (projectHash) {
-                console.log(`[Init] 프로젝트 복원 시도: ${projectHash}`);
-                restored = restoreSession(projectHash);
+            if (openData && openData.projects && openData.projects.length > 0) {
+                console.log(`[Init] ${openData.projects.length}개 프로젝트 복원 시도`);
+
+                // 각 프로젝트 복원 (먼저 모든 프로젝트 구조 생성)
+                openData.projects.forEach(projectInfo => {
+                    // 저장된 상태에서 layoutCols 미리 로드
+                    const savedState = loadState(projectInfo.hash);
+                    const savedLayoutCols = savedState?.layoutCols || 1;
+                    const gridEl = createProjectGrid(projectInfo.hash, savedLayoutCols);
+                    projects[projectInfo.hash] = {
+                        hash: projectInfo.hash,
+                        path: projectInfo.path,
+                        terminals: [],
+                        layoutCols: savedLayoutCols,
+                        gridEl: gridEl
+                    };
+                });
+
+                // 활성 프로젝트 먼저 전환
+                const targetHash = openData.activeHash || openData.projects[0].hash;
+                if (projects[targetHash]) {
+                    switchProject(targetHash);
+                    // 활성 프로젝트 터미널 복원
+                    restored = restoreProjectSession(targetHash);
+                }
+
+                // 나머지 프로젝트도 터미널 복원 (백그라운드)
+                openData.projects.forEach(projectInfo => {
+                    if (projectInfo.hash !== targetHash) {
+                        restoreProjectSession(projectInfo.hash);
+                    }
+                });
+
+                renderProjectTabs();
             }
 
-            console.log('[Init] 세션 복원 결과:', restored);
+            // URL 또는 마지막 프로젝트로 폴백
+            if (!restored) {
+                const urlHash = getProjectFromUrl();
+                const lastHash = getLastProject();
 
-            if (restored && workDir) {
-                // 복원된 폴더를 최근 프로젝트에 추가
-                addToRecent(workDir);
+                if (urlHash || lastHash) {
+                    const targetHash = urlHash || lastHash;
+                    // 1. 최근 프로젝트에서 경로 찾기
+                    let path = recentProjects.find(p => hashPath(p) === targetHash);
+                    // 2. 없으면 저장된 세션 상태에서 workDir 가져오기
+                    if (!path) {
+                        const savedState = loadState(targetHash);
+                        if (savedState?.workDir) {
+                            path = savedState.workDir;
+                            console.log(`[Init] 저장된 상태에서 workDir 복원: ${path}`);
+                        }
+                    }
+                    if (path) {
+                        openProject(path);
+                        restored = true;
+                    }
+                }
             }
 
             if (!restored) {
-                // 저장된 세션이 없으면 폴더 선택 모달 표시
                 setTimeout(openFolderModal, 300);
             }
+
+            console.log('[Init] 완료, 열린 프로젝트:', Object.keys(projects).length);
         });
     </script>
 </body>

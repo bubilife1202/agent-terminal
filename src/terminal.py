@@ -131,6 +131,7 @@ class TerminalSession:
         self.websocket: Optional[WebSocket] = None
         self._read_task: Optional[asyncio.Task] = None
         self._running = False
+        self._temp_files: set[str] = set()  # Track temp files for cleanup (set으로 중복 방지)
 
         # Get agent config
         self.config = AGENT_CONFIGS.get(agent_type, AGENT_CONFIGS["claude"])
@@ -316,6 +317,9 @@ class TerminalSession:
             with open(temp_path, "wb") as f:
                 f.write(image_bytes)
 
+            # Track temp file for cleanup (set이므로 중복 자동 무시)
+            self._temp_files.add(temp_path)
+
             # Send file path using agent's add command
             cmd = add_cmd.format(path=temp_path) + "\n"
             await self.write(cmd)
@@ -363,6 +367,17 @@ class TerminalSession:
             except Exception as e:
                 print(f"[Terminal] Stop error: {e}")
             self.pty = None
+
+        # Cleanup temp files (복사본으로 iteration하여 thread-safety 보장)
+        temp_files_copy = list(self._temp_files)
+        self._temp_files = set()  # 먼저 clear하여 race condition 방지
+        for temp_path in temp_files_copy:
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                    print(f"[Terminal] Cleaned up temp file: {temp_path}")
+            except Exception as e:
+                print(f"[Terminal] Failed to cleanup temp file {temp_path}: {e}")
 
 
 # Active terminal sessions

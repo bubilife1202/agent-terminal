@@ -5,6 +5,225 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-01-11
+
+### Changed
+- **Architecture Modernization**: Complete frontend modularization
+  - `templates/index.html` reduced from 2,066 lines to 201 lines (90% reduction)
+  - CSS extracted to `static/css/style.css` (722 lines)
+  - JavaScript split into 5 modular files:
+    - `static/js/state.js` - Configuration and state management (166 lines)
+    - `static/js/terminal.js` - Terminal creation and WebSocket handling (318 lines)
+    - `static/js/ui.js` - UI rendering, modals, layout management (454 lines)
+    - `static/js/websocket.js` - Health check and server communication (83 lines)
+    - `static/js/main.js` - Application entry point (38 lines)
+  - Added static file serving via FastAPI StaticFiles middleware
+
+### Benefits
+- Improved maintainability with separated concerns
+- Better cacheability of static assets
+- Easier debugging and testing
+- Foundation for future framework migration (React/Vue)
+
+## [1.4.7] - 2026-01-11
+
+### Fixed
+- **Terminal half-screen rendering (ACTUAL FIX)**: Missing CSS for `#projectContents`
+  - Added `flex: 1`, `display: flex`, `flex-direction: column`, `min-height: 0` to `#projectContents`
+  - This was the ROOT CAUSE - container had no height!
+
+## [1.4.6] - 2026-01-11
+
+### Fixed
+- **Terminal half-screen rendering (FINAL FIX)**: Complete CSS overhaul for flexbox layout
+  - Added `min-height: 0` to ALL flex children (critical for proper sizing)
+  - Added `height: 100%` to html, body, grid-container, project-content, term-cell
+  - Added `grid-template-rows: 1fr` to all grid layouts
+  - Added `overflow: hidden` to prevent content overflow
+  - Force xterm to fill container with `height: 100% !important`
+
+## [1.4.5] - 2026-01-11
+
+### Added
+- **Auto-layout**: Layout automatically adjusts based on terminal count
+  - 1 terminal → full width (layout 1)
+  - 2 terminals → side by side (layout 2)
+  - 3-4 terminals → 2x2 grid (layout 4)
+
+### Fixed
+- **File explorer not clearing**: Now clears when all projects are closed
+- **Terminal half-screen rendering**: Improved fit() with smart sizing
+  - Added `smartFit()` that checks container has actual size before fitting
+  - ResizeObserver now only fits when container width/height > 0
+  - Added more delayed fit attempts (up to 1000ms)
+
+## [1.4.4] - 2026-01-11
+
+### Added
+- **Version display**: Shows version badge (v1.4.4) in header next to title
+
+### Fixed
+- **Drive icon duplication**: Removed duplicate 💾 icon in folder picker (was showing "💾 💾 C:")
+- **Console window issues on restart**: 
+  - Fixed double console window opening on server restart
+  - Fixed old console not closing (now uses `exit` instead of `exit /b`)
+  - Added RESTART_MODE to prevent browser reopening on restart
+- **Black terminal screen**: 
+  - Agent card click now auto-creates terminal after folder selection
+  - Added more fit() delays (100ms, 300ms, 500ms) for reliable initial render
+  - Added `pendingAgentType` to track agent selection through folder picker flow
+
+## [1.4.3] - 2026-01-11
+
+### Fixed
+- **Memory leak**: ResizeObserver now properly disconnected when terminal closes
+- **XSS vulnerability**: Path strings now HTML-escaped in project tabs and history
+- **Project name parsing**: Fixed "D:\" showing as empty string (now shows "D:")
+- **WebSocket cleanup**: All handlers (onopen/onclose/onerror/onmessage) cleared on reconnect
+- **Terminal fit timing**: Multiple fit() calls with delays for reliable initial render
+- **Connection status**: Shows "Connecting..." before actual connection (not "Connected")
+- **State restoration**: Terminals properly reconnect after server restart
+
+### Changed
+- **saveState debounce**: Added 500ms debounce to reduce localStorage writes
+- **localStorage version**: Bumped to v4 (clears old data for fresh start)
+
+### Added
+- `clearAllData()` function for manual data reset
+- `saveStateLater()` debounced save function
+
+## [1.4.2] - 2026-01-11
+
+### Changed
+- **Header UI redesign**
+  - Moved "New Terminal" button to header-actions group (more logical position)
+  - Layout buttons now use visual SVG icons instead of confusing "1/2/4" numbers
+  - Added `.btn-group` styling for layout buttons with active state
+  - Added dividers between button groups for clearer separation
+
+### Fixed
+- **Server restart opens new console**: Restart now closes old console and opens fresh one
+  - Uses flag file (`.restart-new-console`) to signal new console mode
+  - Old console exits cleanly, new one opens with start.bat
+- **Session ID conflict on restore**: Always generate new UUIDs when restoring terminals
+  - Prevents "Session ID already in use" errors from Claude CLI
+  - Old session IDs are not reused to avoid conflicts with Claude's internal tracking
+
+## [1.4.1] - 2026-01-11
+
+### Fixed
+- **Terminal connection retry**: Added automatic retry mechanism with exponential backoff
+  - Up to 5 retry attempts (1s, 2s, 3s, 4s, 5s delays)
+  - Clear feedback messages during reconnection
+  - Prevents "[Connection Error]" spam after server restart
+  - Shows helpful message after max retries exceeded
+- **Session restoration after restart**: Terminals now properly reconnect after server restart
+
+## [1.4.0] - 2026-01-11
+
+### Changed
+- **UI/UX Complete Redesign**
+  - Header simplified: buttons grouped into logical sections
+  - Folder/File buttons grouped together
+  - Layout buttons grouped together with SVG icons
+  - Server restart and reset moved to ⚙️ dropdown menu
+  - Agent Dock now uses popover for role selection
+  - Click Agent icon to see options (start with role / change role / stop)
+  - Removed standalone Agent Select Modal (replaced by inline popover)
+
+### Removed
+- Dead code cleanup: `addAgent()`, `openAgentSelectModal()`, `confirmAgentSelect()` functions
+- Agent Select Modal HTML removed (functionality moved to Agent Dock popover)
+
+### Fixed
+- **Server restart now opens new console window**: Clicking restart in ⚙️ menu always opens a fresh console
+
+### Added
+- Settings dropdown menu (⚙️) with: Server restart, Session reset, Keyboard shortcuts, About
+- `closeAllPopovers()` function for managing popover state
+- Click-outside handlers for closing popovers and dropdowns
+- `startAgentWithRole()`, `changeAgentRole()`, `stopAgent()` for Agent Dock operations
+
+## [1.3.4] - 2026-01-11
+
+### Fixed
+- **Server restart console closing**: Console window now stays open after restart
+  - Added RESTART_LOOP in start.bat to auto-restart server when process exits
+  - Simplified server.py restart logic - just exits, start.bat handles restart
+  - Removed subprocess.Popen with CREATE_NO_WINDOW (caused invisible server)
+  - Console remains visible for monitoring and logs
+
+## [1.3.3] - 2026-01-11
+
+### Fixed
+- **Server restart**: Major reliability improvements
+  - Replaced `os._exit(0)` with `sys.exit(0)` for proper shutdown_event trigger
+  - Removed duplicate window flags (CREATE_NO_WINDOW only)
+  - Added stdin/stdout/stderr redirect to DEVNULL
+  - Added 1 second delay before exit for new process startup
+- **Image paste**: Fixed file extension mismatch
+  - Now uses correct extension based on MIME type (.jpg, .gif, .webp)
+  - Added WebSocket send() error handling
+  - Improved permissions.query() browser compatibility
+- **Restart reconnection**: Improved retry logic
+  - Changed from fixed 3s wait to 10-retry loop (1s intervals)
+  - Auto-reload on successful reconnection
+
+## [1.3.2] - 2026-01-11
+
+### Fixed
+- **Restart endpoint**: Added TERMINAL_IMPORT_ERROR check before restart
+  - Returns 503 error if terminal module not loaded
+  - Prevents crash when pywinpty is missing
+- **WebSocket handler**: Fixed parameter name mismatch in function call
+  - Changed positional args to explicit keyword args (working_dir, agent_type)
+
+## [1.3.1] - 2026-01-11
+
+### Changed
+- **Code structure**: Separated HTML/JS/CSS from server.py to templates/index.html
+  - server.py reduced from ~2100 lines to ~315 lines
+  - Frontend code now in dedicated template file
+- **Mock Terminal**: Improved error handling when pywinpty is missing
+  - Shows clear installation instructions in terminal
+  - Console warning on server startup
+  - User-friendly error messages instead of silent failure
+
+### Added
+- **README.md**: Comprehensive documentation with installation, usage, and API reference
+
+## [1.3.0] - 2026-01-11
+
+### Fixed
+- **Session conflict loop**: Fixed "세션 충돌 감지" repeating infinitely
+  - Always generate new UUID on restore (no reuse of old session IDs)
+  - Conflict detection now only checks current message (not buffer)
+  - Added `handlingSessionConflict` flag check before processing
+- **Server restart console**: Fixed new console window opening on restart
+  - Windows: Now uses `CREATE_NO_WINDOW` instead of `CREATE_NEW_CONSOLE`
+  - Server restarts silently in background
+- **Image paste improvements**:
+  - Added clipboard permission check with user feedback
+  - Added image format validation (PNG, JPEG, GIF, WebP only)
+  - Added file size limit (50MB) with error message
+  - Improved error messages for permission denied, network errors
+  - Backend: Added base64 validation and size limit check
+  - Backend: UUID added to temp filename to prevent overwrites
+- **SessionManager concurrency**: Fixed dictionary iteration during modification
+  - `broadcast()` and `send_direct()` now use dict copies
+  - Dead sessions are auto-cleaned after failed sends
+  - Duplicate session registration now closes old WebSocket first
+- **Terminal duplication**: `createTerminal()` now checks for existing ID
+  - Returns existing terminal instead of creating duplicate
+- **Health check race condition**: Now skips terminals already reconnecting
+  - Checks `reconnectTimeout` and `handlingSessionConflict` flags
+  - Fixed server status not updating on response failure
+- **taskkill timeout**: Added proper exception handling for Windows process kill
+
+### Added
+- **Shutdown handler**: `@app.on_event("shutdown")` cleans up all sessions
+  - PTY processes properly terminated on server stop (Ctrl+C)
+
 ## [1.2.3] - 2026-01-11
 
 ### Fixed

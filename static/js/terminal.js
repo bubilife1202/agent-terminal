@@ -165,6 +165,9 @@ function createTerminal(type, role = 'General', id = null) {
     });
     
     term.attachCustomKeyEventHandler((e) => {
+        // Only handle keydown events to prevent duplicate actions
+        if (e.type !== 'keydown') return true;
+        
         // Ctrl+Shift+C: Copy selected text
         if (e.ctrlKey && e.shiftKey && e.key === 'C') {
             const selection = term.getSelection();

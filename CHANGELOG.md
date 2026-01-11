@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.3] - 2026-01-11
+
+### Fixed
+- **Layout restore bug**: Server restart now correctly restores layout based on terminal count
+- **Performance**: Major rendering optimizations to fix terminal lag
+  - Disabled `cursorBlink` to reduce DOM repaints
+  - WebSocket message batching with `requestAnimationFrame`
+  - `window.onresize` debounce increased to 300ms with proper clearTimeout
+  - `ResizeObserver` debounce: fit() 50ms, resize message 500ms
+  - PTY read loop: `sleep(0.001)` active, `sleep(0.05)` idle (was 0/0.01)
+- **Edge cases**: Improved robustness
+  - `onmessage` now ignores messages after `dispose()`
+  - RAF callback wrapped in try-catch-finally for safe cleanup
+  - `onclose` clears message queue to prevent memory buildup
+
+### Changed
+- **Max terminals reduced to 4** (was 6) - cleaner 2x2 grid layout
+- Removed 6-column layout button from UI
+- `autoUpdateLayout()` max layout is now 4 (2x2 grid)
+
 ## [1.2.2] - 2026-01-11
 
 ### Added
@@ -12,7 +32,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 1 terminal: full screen (cols-1), button [1] active
   - 2 terminals: horizontal split (cols-2), button [2] active
   - 3~4 terminals: 2x2 grid (cols-4), button [4] active
-  - 5~6 terminals: 3x2 grid (cols-6), button [6] active
 - `autoUpdateLayout()` function called on terminal add/remove
 
 ### Fixed

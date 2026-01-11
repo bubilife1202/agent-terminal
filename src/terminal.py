@@ -112,7 +112,7 @@ AGENT_CONFIGS = {
 }
 
 # Maximum number of concurrent terminals
-MAX_TERMINALS = 6
+MAX_TERMINALS = 4
 
 AgentType = Literal["claude", "gemini", "codex", "opencode", "shell"]
 
@@ -225,19 +225,23 @@ class TerminalSession:
 
                 data = await loop.run_in_executor(
                     None,
-                    lambda: self.pty.read(4096) if self.pty and self.pty.isalive() else ""
+                    lambda: self.pty.read(16384) if self.pty and self.pty.isalive() else ""
                 )
 
-                if data and self.websocket:
-                    read_count += 1
-                    if read_count <= 3:  # Log first few reads
-                        print(f"[Terminal] Read #{read_count}: {len(data)} bytes")
-                    await self.websocket.send_json({
-                        "type": "terminal_output",
-                        "data": data
-                    })
-
-                await asyncio.sleep(0.01)
+                if data:
+                    if self.websocket:
+                        read_count += 1
+                        if read_count <= 3:  # Log first few reads
+                            print(f"[Terminal] Read #{read_count}: {len(data)} bytes")
+                        await self.websocket.send_json({
+                            "type": "terminal_output",
+                            "data": data
+                        })
+                    # Data flow active - small sleep to prevent busy loop while maintaining responsiveness
+                    await asyncio.sleep(0.001)
+                else:
+                    # No data - longer sleep to reduce CPU usage
+                    await asyncio.sleep(0.05)
 
             except Exception as e:
                 print(f"[Terminal] Read exception: {type(e).__name__}: {e}")

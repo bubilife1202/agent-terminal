@@ -7,7 +7,7 @@ Features:
 3. Inter-Agent Communication Message Bus
 """
 
-__version__ = "1.2.2"
+__version__ = "1.2.3"
 
 import os
 import sys
@@ -425,9 +425,6 @@ HTML_CONTENT = """
                 </button>
                 <button class="layout-btn" data-layout="4" onclick="setLayout(4)" title="4개 (2x2)">
                     <svg width="18" height="14" viewBox="0 0 18 14"><rect x="1" y="1" width="7" height="5" rx="1" fill="currentColor"/><rect x="10" y="1" width="7" height="5" rx="1" fill="currentColor"/><rect x="1" y="8" width="7" height="5" rx="1" fill="currentColor"/><rect x="10" y="8" width="7" height="5" rx="1" fill="currentColor"/></svg>
-                </button>
-                <button class="layout-btn" data-layout="6" onclick="setLayout(6)" title="6개 (3x2)">
-                    <svg width="18" height="14" viewBox="0 0 18 14"><rect x="1" y="1" width="4" height="5" rx="0.5" fill="currentColor"/><rect x="7" y="1" width="4" height="5" rx="0.5" fill="currentColor"/><rect x="13" y="1" width="4" height="5" rx="0.5" fill="currentColor"/><rect x="1" y="8" width="4" height="5" rx="0.5" fill="currentColor"/><rect x="7" y="8" width="4" height="5" rx="0.5" fill="currentColor"/><rect x="13" y="8" width="4" height="5" rx="0.5" fill="currentColor"/></svg>
                 </button>
             </div>
             <select id="newAgentType" title="에이전트 타입">
@@ -1088,6 +1085,25 @@ HTML_CONTENT = """
                 }, 100);
 
                 renderProjectTabs();
+
+                // 터미널 개수에 맞춰 레이아웃 자동 조정
+                const terminalCount = project.terminals.length;
+                let correctLayout;
+                if (terminalCount === 1) {
+                    correctLayout = 1;
+                } else if (terminalCount === 2) {
+                    correctLayout = 2;
+                } else {
+                    correctLayout = 4;  // 3-4개: 2x2 그리드
+                }
+                project.layoutCols = correctLayout;
+                project.gridEl.className = `grid cols-${correctLayout} project-grid${isActive ? ' active' : ''}`;
+
+                if (isActive) {
+                    updateLayoutButtons(correctLayout);
+                    setTimeout(fitAll, 100);
+                }
+
                 return true;
             }
             return false;
@@ -1290,10 +1306,8 @@ HTML_CONTENT = """
                 layout = 1;  // 전체 화면
             } else if (n === 2) {
                 layout = 2;  // 가로 2분할
-            } else if (n <= 4) {
-                layout = 4;  // 2x2 그리드
             } else {
-                layout = 6;  // 3x2 그리드
+                layout = 4;  // 3-4개: 2x2 그리드 (최대)
             }
             setLayout(layout);
         }
@@ -1311,6 +1325,9 @@ HTML_CONTENT = """
                 this.term = null;
                 this.fitAddon = null;
                 this.resizeObserver = null;  // ResizeObserver 인스턴스 저장
+                // 메시지 배칭용 (성능 최적화)
+                this.messageQueue = [];
+                this.rafId = null;
 
                 this.el = document.createElement('div');
                 this.el.className = 'cell';
@@ -1373,7 +1390,7 @@ HTML_CONTENT = """
                 this.term = new Terminal({
                     fontFamily: 'Consolas, Monaco, monospace',
                     fontSize: 13,
-                    cursorBlink: true,
+                    cursorBlink: false,
                     theme: {
                         background: '#1a1b26',
                         foreground: '#c0caf5',
@@ -1406,8 +1423,11 @@ HTML_CONTENT = """
 
                 // Resize observer with debounce (저장하여 dispose 시 해제)
                 let resizeTimeout = null;
+                let fitTimeout = null;
                 this.resizeObserver = new ResizeObserver(() => {
-                    this.fitAddon?.fit();
+                    // Debounce fit() calls too
+                    if (fitTimeout) clearTimeout(fitTimeout);
+                    fitTimeout = setTimeout(() => this.fitAddon?.fit(), 50);
                     // Debounce resize events to prevent duplicate Claude UI renders
                     if (resizeTimeout) clearTimeout(resizeTimeout);
                     resizeTimeout = setTimeout(() => {
@@ -1418,7 +1438,7 @@ HTML_CONTENT = """
                                 cols: this.term.cols
                             }));
                         }
-                    }, 200);
+                    }, 500);
                 });
                 this.resizeObserver.observe(container);
 
@@ -1499,6 +1519,8 @@ HTML_CONTENT = """
                 };
 
                 this.ws.onmessage = (e) => {
+                    // dispose 후 메시지 무시
+                    if (this.disposed) return;
                     const msg = JSON.parse(e.data);
                     switch (msg.type) {
                         case 'terminal_output':
@@ -1510,54 +1532,75 @@ HTML_CONTENT = """
                                 this.outputBuffer = this.outputBuffer.slice(-1000);
                             }
 
-                            // Check for "Session ID already in use" error (Claude CLI specific)
-                            // Use comprehensive ANSI stripping (all escape sequences, not just colors)
-                            const stripAnsi = (s) => s.replace(/\\x1b\\[[^a-zA-Z]*[a-zA-Z]/g, '')
-                                                       .replace(/\\x1b\\][^\\x07]*\\x07/g, '')
-                                                       .replace(/[\\x00-\\x1f]/g, ' ');
-                            const plainText = stripAnsi(msg.data);
-                            const bufferText = stripAnsi(this.outputBuffer);
+                            // Optimization: Only run expensive conflict check on small packets
+                            if (msg.data.length < 4096) {
+                                // Check for "Session ID already in use" error (Claude CLI specific)
+                                // Use comprehensive ANSI stripping (all escape sequences, not just colors)
+                                const stripAnsi = (s) => s.replace(/\\x1b\\[[^a-zA-Z]*[a-zA-Z]/g, '')
+                                                           .replace(/\\x1b\\][^\\x07]*\\x07/g, '')
+                                                           .replace(/[\\x00-\\x1f]/g, ' ');
+                                const plainText = stripAnsi(msg.data);
+                                const bufferText = stripAnsi(this.outputBuffer);
 
-                            // Debug: log incoming data for session conflict troubleshooting
-                            if (msg.data.toLowerCase().includes('session') || msg.data.toLowerCase().includes('error')) {
-                                console.log('[Terminal] Checking msg:', JSON.stringify(msg.data.slice(0, 200)));
-                                console.log('[Terminal] Plain text:', plainText.slice(0, 200));
-                            }
-
-                            // Use case-insensitive regex for robust detection
-                            const conflictPattern = /already\\s+in\\s+use/i;
-                            if (conflictPattern.test(plainText) || conflictPattern.test(bufferText) ||
-                                conflictPattern.test(msg.data) || conflictPattern.test(this.outputBuffer)) {
-                                console.log('[Terminal] Session conflict detected! Old:', this.sessionId);
-                                this.term.write(msg.data);  // Show error
-                                this.term.write('\\r\\n\\x1b[33m[세션 충돌 감지 - 새 세션 생성 중...]\\x1b[0m\\r\\n');
-
-                                // Set flag FIRST to prevent auto-reconnect from onclose
-                                this.handlingSessionConflict = true;
-
-                                // Close current connection cleanly
-                                if (this.ws) {
-                                    this.ws.onclose = null;  // Prevent onclose handler
-                                    this.ws.close();
+                                // Debug: log incoming data for session conflict troubleshooting
+                                if (msg.data.toLowerCase().includes('session') || msg.data.toLowerCase().includes('error')) {
+                                    console.log('[Terminal] Checking msg:', JSON.stringify(msg.data.slice(0, 200)));
+                                    console.log('[Terminal] Plain text:', plainText.slice(0, 200));
                                 }
 
-                                // Generate new session ID
-                                this.sessionId = generateUUID();
-                                console.log('[Terminal] New session ID:', this.sessionId);
-                                this.outputBuffer = '';  // Clear buffer
-                                saveState();
+                                // Use case-insensitive regex for robust detection
+                                const conflictPattern = /already\\s+in\\s+use/i;
+                                if (conflictPattern.test(plainText) || conflictPattern.test(bufferText) ||
+                                    conflictPattern.test(msg.data) || conflictPattern.test(this.outputBuffer)) {
+                                    console.log('[Terminal] Session conflict detected! Old:', this.sessionId);
+                                    this.term.write(msg.data);  // Show error
+                                    this.term.write('\\r\\n\\x1b[33m[세션 충돌 감지 - 새 세션 생성 중...]\\x1b[0m\\r\\n');
 
-                                // Reconnect with new session after delay
-                                setTimeout(() => {
-                                    this.handlingSessionConflict = false;
-                                    this.reconnectAttempts = 0;
-                                    this.connect();
-                                }, 1500);
-                                return;
+                                    // Set flag FIRST to prevent auto-reconnect from onclose
+                                    this.handlingSessionConflict = true;
+
+                                    // Close current connection cleanly
+                                    if (this.ws) {
+                                        this.ws.onclose = null;  // Prevent onclose handler
+                                        this.ws.close();
+                                    }
+
+                                    // Generate new session ID
+                                    this.sessionId = generateUUID();
+                                    console.log('[Terminal] New session ID:', this.sessionId);
+                                    this.outputBuffer = '';  // Clear buffer
+                                    saveState();
+
+                                    // Reconnect with new session after delay
+                                    setTimeout(() => {
+                                        this.handlingSessionConflict = false;
+                                        this.reconnectAttempts = 0;
+                                        this.connect();
+                                    }, 1500);
+                                    return;
+                                }
                             }
-                            this.term.write(msg.data);
-                            // Route to target if set
-                            if (this.targetId) this.sendToTarget(msg.data);
+                            // 메시지 큐에 추가 (배칭)
+                            this.messageQueue.push(msg.data);
+                            // RAF가 없으면 예약
+                            if (!this.rafId) {
+                                this.rafId = requestAnimationFrame(() => {
+                                    try {
+                                        // 큐에 있는 모든 메시지 일괄 처리
+                                        if (this.messageQueue.length > 0 && this.term && !this.disposed) {
+                                            const combined = this.messageQueue.join('');
+                                            this.term.write(combined);
+                                            // 라우팅도 일괄 처리
+                                            if (this.targetId) this.sendToTarget(combined);
+                                        }
+                                    } catch (e) {
+                                        console.error('[Terminal] Error in message batch:', e);
+                                    } finally {
+                                        this.messageQueue = [];
+                                        this.rafId = null;
+                                    }
+                                });
+                            }
                             break;
                         case 'terminal_started':
                             this.term.write(`\\r\\n\\x1b[38;2;${this.hexToRgb(cfg.color)}m${cfg.icon} ${cfg.name} 준비 완료\\x1b[0m\\r\\n`);
@@ -1587,6 +1630,12 @@ HTML_CONTENT = """
                 this.ws.onclose = () => {
                     const dot = this.el.querySelector(`[data-dot-for="${this.id}"]`);
                     if (dot) dot.classList.remove('live');
+
+                    // 연결 끊김 시 메시지 큐 정리
+                    if (this.messageQueue.length > 0) {
+                        console.log(`[Terminal ${this.id}] Dropped ${this.messageQueue.length} queued messages`);
+                        this.messageQueue = [];
+                    }
 
                     // Clear stable connection timer
                     if (this.stableConnectionTimer) {
@@ -1666,6 +1715,8 @@ HTML_CONTENT = """
                 this.disposed = true;
                 if (this.reconnectTimeout) clearTimeout(this.reconnectTimeout);
                 if (this.stableConnectionTimer) clearTimeout(this.stableConnectionTimer);
+                if (this.rafId) cancelAnimationFrame(this.rafId);
+                this.messageQueue = [];
                 if (this.resizeObserver) this.resizeObserver.disconnect();
                 if (this.ws) this.ws.close();
                 if (this.term) this.term.dispose();
@@ -1733,8 +1784,8 @@ HTML_CONTENT = """
                 return;
             }
             const terminals = getActiveTerminals();
-            if (terminals.length >= 6) {
-                showToast('최대 6개의 터미널까지만 가능합니다', 'warning');
+            if (terminals.length >= 4) {
+                showToast('최대 4개의 터미널까지만 가능합니다', 'warning');
                 return;
             }
             const type = document.getElementById('newAgentType').value;
@@ -1885,7 +1936,11 @@ HTML_CONTENT = """
         }
 
         // ========== Init ==========
-        window.onresize = () => setTimeout(fitAll, 100);
+        let windowResizeTimeout;
+        window.onresize = () => {
+            clearTimeout(windowResizeTimeout);
+            windowResizeTimeout = setTimeout(fitAll, 300);
+        };
         window.onbeforeunload = () => {
             console.log('[Unload] 모든 프로젝트 상태 저장');
             Object.keys(projects).forEach(hash => {

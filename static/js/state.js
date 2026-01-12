@@ -137,7 +137,7 @@ function loadState() {
                     state.activeProject = path;
 
                     if (projData.terminals && projData.terminals.length > 0) {
-                        projData.terminals.forEach(t => createTerminal(t.type, t.role, null));
+                        projData.terminals.forEach(t => createTerminal(t.type, t.role, t.id));
                     }
                 }
             }

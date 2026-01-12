@@ -248,9 +248,16 @@ function connectTerminal(termObj, retryCount = 0) {
         try {
             const msg = JSON.parse(event.data);
             if (msg.type === 'terminal_output') {
+                // Check if already at bottom before writing
+                const buffer = termObj.term.buffer.active;
+                const isAtBottom = buffer.baseY + termObj.term.rows >= buffer.length;
+                
                 termObj.term.write(msg.data);
-                // Auto-scroll to bottom on new output
-                termObj.term.scrollToBottom();
+                
+                // Only auto-scroll if user was already at bottom
+                if (isAtBottom) {
+                    termObj.term.scrollToBottom();
+                }
                 
                 // Auto-continue: track output
                 if (termObj.auto.enabled) {

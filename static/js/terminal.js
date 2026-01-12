@@ -338,8 +338,27 @@ function closeTerminal(id) {
 function restartTerminal(id) {
     const found = findTerminal(id);
     if (found) {
-        found.terminal.term.reset();
-        connectTerminal(found.terminal);
+        const t = found.terminal;
+        // 새 세션 ID 생성 (Claude CLI "already in use" 에러 방지)
+        const newId = crypto.randomUUID();
+        const oldId = t.id;
+        
+        // Update terminal ID
+        t.id = newId;
+        t.el.id = `term-${newId}`;
+        
+        // Update UI elements that reference the old ID
+        t.el.querySelector('.role-badge').setAttribute('onclick', `cycleRole('${newId}')`);
+        t.el.querySelector('.auto-btn').setAttribute('onclick', `toggleAutoContinue('${newId}')`);
+        t.el.querySelector('[title="Restart Session"]').setAttribute('onclick', `restartTerminal('${newId}')`);
+        t.el.querySelector('[title="Maximize"]').setAttribute('onclick', `toggleMaximize('${newId}')`);
+        t.el.querySelector('[title="Close"]').setAttribute('onclick', `closeTerminal('${newId}')`);
+        t.el.querySelector('.scroll-to-bottom-btn').setAttribute('onclick', `scrollTerminalToBottom('${newId}')`);
+        
+        t.term.reset();
+        t.term.write(`\x1b[90m[New session: ${newId.substring(0, 8)}...]\x1b[0m\r\n`);
+        connectTerminal(t);
+        saveStateLater();
     }
 }
 
@@ -377,9 +396,26 @@ function toggleMaximize(id) {
 
 function reconnectAllTerminals() {
     getAllTerminals().forEach(t => {
-        t.term.write('\r\n\x1b[33m[Reconnecting...]\x1b[0m\r\n');
+        // 새 세션 ID로 재연결 (Claude CLI "already in use" 에러 방지)
+        const newId = crypto.randomUUID();
+        const oldId = t.id;
+        
+        // Update terminal ID
+        t.id = newId;
+        t.el.id = `term-${newId}`;
+        
+        // Update UI elements that reference the old ID
+        t.el.querySelector('.role-badge').setAttribute('onclick', `cycleRole('${newId}')`);
+        t.el.querySelector('.auto-btn').setAttribute('onclick', `toggleAutoContinue('${newId}')`);
+        t.el.querySelector('[title="Restart Session"]').setAttribute('onclick', `restartTerminal('${newId}')`);
+        t.el.querySelector('[title="Maximize"]').setAttribute('onclick', `toggleMaximize('${newId}')`);
+        t.el.querySelector('[title="Close"]').setAttribute('onclick', `closeTerminal('${newId}')`);
+        t.el.querySelector('.scroll-to-bottom-btn').setAttribute('onclick', `scrollTerminalToBottom('${newId}')`);
+        
+        t.term.write(`\r\n\x1b[33m[Reconnecting with new session...]\x1b[0m\r\n`);
         connectTerminal(t);
     });
+    saveStateLater();
 }
 
 async function handlePaste(termObj) {

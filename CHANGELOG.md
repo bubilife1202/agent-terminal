@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.4] - 2026-01-12
+
+### Changed
+- **Max Projects Increased**: Increased maximum simultaneous projects from 5 to 10
+  - `MAX_PROJECTS` constant updated in `state.js`
+
+## [1.7.3] - 2026-01-12
+
+### Fixed
+- **Session "already in use" Error**: Fixed Claude CLI session conflict after server restart
+  - Page reload now creates new session IDs instead of reusing old ones
+  - Restart Session (↻) button generates new session ID
+  - Server reconnect creates new session IDs for all terminals
+  - Prevents "Session ID xxx is already in use" error
+
+### Changed
+- `loadState()` now passes `null` to `createTerminal()` to generate fresh UUIDs
+- `restartTerminal()` generates new UUID and updates all UI element references
+- `reconnectAllTerminals()` generates new UUIDs for all terminals on reconnect
+
 ## [1.6.0] - 2026-01-11
 
 ### Added

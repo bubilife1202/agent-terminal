@@ -8,7 +8,7 @@ const AGENTS = {
     shell: { name: 'Shell', icon: '⚪', color: '#a9b1d6' }
 };
 
-const MAX_PROJECTS = 5;
+const MAX_PROJECTS = 10;
 
 // Global State
 let state = {
@@ -137,7 +137,9 @@ function loadState() {
                     state.activeProject = path;
 
                     if (projData.terminals && projData.terminals.length > 0) {
-                        projData.terminals.forEach(t => createTerminal(t.type, t.role, t.id));
+                        // 새 세션 ID 생성 (서버 재시작 후 "already in use" 에러 방지)
+                        // Claude CLI는 같은 session-id로 재연결 시 에러 발생하므로 매번 새 ID 생성
+                        projData.terminals.forEach(t => createTerminal(t.type, t.role, null));
                     }
                 }
             }

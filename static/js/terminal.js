@@ -46,7 +46,9 @@ function createTerminal(type, role = 'General', id = null) {
                 <button class="term-btn close" onclick="closeTerminal('${terminalId}')" title="Close">✕</button>
             </div>
         </div>
-        <div class="xterm-wrapper"></div>
+        <div class="xterm-wrapper">
+            <button class="scroll-to-bottom-btn" onclick="scrollTerminalToBottom('${terminalId}')" title="Scroll to bottom">↓</button>
+        </div>
     `;
     
     container.appendChild(cell);
@@ -152,6 +154,7 @@ function createTerminal(type, role = 'General', id = null) {
     proj.terminals.push(termObj);
     resizeObserver.observe(cell.querySelector('.xterm-wrapper'));
     connectTerminal(termObj);
+    setupScrollListener(termObj);
 
     renderProjectTabs();
     autoLayout();
@@ -258,6 +261,9 @@ function connectTerminal(termObj, retryCount = 0) {
                 if (isAtBottom) {
                     termObj.term.scrollToBottom();
                 }
+                
+                // Update scroll-to-bottom button visibility
+                updateScrollButtonVisibility(termObj);
                 
                 // Auto-continue: track output
                 if (termObj.auto.enabled) {
@@ -520,4 +526,31 @@ function updateAutoButton(id, active, iteration = 0) {
             countSpan.textContent = '';
         }
     }
+}
+
+// ========== Scroll to Bottom Button ==========
+
+function scrollTerminalToBottom(id) {
+    const found = findTerminal(id);
+    if (!found) return;
+    
+    found.terminal.term.scrollToBottom();
+    updateScrollButtonVisibility(found.terminal);
+}
+
+function updateScrollButtonVisibility(termObj) {
+    const btn = termObj.el.querySelector('.scroll-to-bottom-btn');
+    if (!btn) return;
+    
+    const buffer = termObj.term.buffer.active;
+    const isAtBottom = buffer.baseY + termObj.term.rows >= buffer.length;
+    
+    btn.classList.toggle('visible', !isAtBottom);
+}
+
+function setupScrollListener(termObj) {
+    // xterm.js scroll event
+    termObj.term.onScroll(() => {
+        updateScrollButtonVisibility(termObj);
+    });
 }

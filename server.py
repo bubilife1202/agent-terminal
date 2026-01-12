@@ -7,7 +7,7 @@ Features:
 3. Inter-Agent Communication Message Bus
 """
 
-__version__ = "1.7.1"
+__version__ = "1.7.2"
 
 import os
 import sys

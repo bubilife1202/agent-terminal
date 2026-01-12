@@ -249,6 +249,8 @@ function connectTerminal(termObj, retryCount = 0) {
             const msg = JSON.parse(event.data);
             if (msg.type === 'terminal_output') {
                 termObj.term.write(msg.data);
+                // Auto-scroll to bottom on new output
+                termObj.term.scrollToBottom();
                 
                 // Auto-continue: track output
                 if (termObj.auto.enabled) {

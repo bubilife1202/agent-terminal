@@ -34,13 +34,9 @@ function createTerminal(type, role = 'General', id = null) {
                 <span>${config.icon}</span>
                 <span>${config.name}</span>
                 <span class="role-badge ${role}" onclick="cycleRole('${terminalId}')">${role}</span>
+                <span class="conn-status connecting" title="Connecting...">●</span>
             </div>
             <div class="term-actions">
-                <button class="auto-btn" onclick="toggleAutoContinue('${terminalId}')" title="Auto-Continue Mode">
-                    <span class="auto-indicator"></span>
-                    <span>Auto</span>
-                    <span class="iteration-count"></span>
-                </button>
                 <button class="term-btn" onclick="restartTerminal('${terminalId}')" title="Restart Session">↻</button>
                 <button class="term-btn" onclick="toggleMaximize('${terminalId}')" title="Maximize">⤢</button>
                 <button class="term-btn close" onclick="closeTerminal('${terminalId}')" title="Close">✕</button>
@@ -102,28 +98,30 @@ function createTerminal(type, role = 'General', id = null) {
         return false;
     };
     
+    // Debounced initial fit - reduce redundant calls
     smartFit();
     requestAnimationFrame(() => {
         if (!smartFit()) {
-            setTimeout(() => smartFit(), 50);
+            setTimeout(() => smartFit(), 100);
         }
-        setTimeout(() => smartFit(), 100);
-        setTimeout(() => smartFit(), 200);
-        setTimeout(() => smartFit(), 500);
-        setTimeout(() => smartFit(), 1000);
     });
 
+    // Debounced resize handler to prevent excessive fit() calls
+    let resizeTimeout = null;
     const resizeObserver = new ResizeObserver((entries) => {
         for (const entry of entries) {
             if (entry.contentRect.width > 0 && entry.contentRect.height > 0) {
-                fitAddon.fit();
-                if (termObj.ws && termObj.ws.readyState === WebSocket.OPEN) {
-                    termObj.ws.send(JSON.stringify({ 
-                        type: 'resize', 
-                        rows: term.rows,
-                        cols: term.cols 
-                    }));
-                }
+                if (resizeTimeout) clearTimeout(resizeTimeout);
+                resizeTimeout = setTimeout(() => {
+                    fitAddon.fit();
+                    if (termObj.ws && termObj.ws.readyState === WebSocket.OPEN) {
+                        termObj.ws.send(JSON.stringify({ 
+                            type: 'resize', 
+                            rows: term.rows,
+                            cols: term.cols 
+                        }));
+                    }
+                }, 50);  // 50ms debounce
             }
         }
     });
@@ -239,6 +237,7 @@ function connectTerminal(termObj, retryCount = 0) {
     termObj.ws.onopen = () => {
         connected = true;
         termObj.term.write(`\x1b[32m✔ Connected to ${AGENTS[termObj.type].name} (${termObj.role})\x1b[0m\r\n`);
+        updateConnStatus(termObj.id, 'connected');
         termObj.fit.fit();
         termObj.ws.send(JSON.stringify({
             type: 'resize',
@@ -247,31 +246,36 @@ function connectTerminal(termObj, retryCount = 0) {
         }));
     };
 
+    // Throttled scroll button update (avoid per-message overhead)
+    let scrollUpdatePending = false;
+    const throttledScrollUpdate = () => {
+        if (!scrollUpdatePending) {
+            scrollUpdatePending = true;
+            requestAnimationFrame(() => {
+                updateScrollButtonVisibility(termObj);
+                scrollUpdatePending = false;
+            });
+        }
+    };
+
     termObj.ws.onmessage = (event) => {
         try {
             const msg = JSON.parse(event.data);
             if (msg.type === 'terminal_output') {
-                // Check if already at bottom before writing
-                const buffer = termObj.term.buffer.active;
-                const isAtBottom = buffer.baseY + termObj.term.rows >= buffer.length;
-                
+                // Write data immediately - xterm handles batching internally
                 termObj.term.write(msg.data);
                 
-                // Only auto-scroll if user was already at bottom
-                if (isAtBottom) {
-                    termObj.term.scrollToBottom();
-                }
+                // Throttled scroll button visibility update
+                throttledScrollUpdate();
                 
-                // Update scroll-to-bottom button visibility
-                updateScrollButtonVisibility(termObj);
-                
-                // Auto-continue: track output
+                // Auto-continue: track output (only if enabled)
                 if (termObj.auto.enabled) {
                     termObj.auto.lastOutputTime = Date.now();
-                    termObj.auto.outputBuffer += msg.data;
+                    // Limit buffer size to prevent memory issues
+                    termObj.auto.outputBuffer = (termObj.auto.outputBuffer + msg.data).slice(-5000);
                     
                     // Check for completion signal
-                    if (termObj.auto.outputBuffer.includes('=== DONE ===')) {
+                    if (msg.data.includes('=== DONE ===')) {
                         stopAutoContinue(termObj.id);
                         showToast(`✅ 작업 완료! (${termObj.auto.iterationCount}회 반복)`, 'success');
                         termObj.term.write('\r\n\x1b[32m[Auto-Continue: Task completed!]\x1b[0m\r\n');
@@ -303,6 +307,7 @@ function connectTerminal(termObj, retryCount = 0) {
         if (connected) {
             termObj.term.write('\r\n\x1b[90m[Connection Closed]\x1b[0m\r\n');
         }
+        updateConnStatus(termObj.id, 'disconnected');
     };
 }
 
@@ -349,7 +354,6 @@ function restartTerminal(id) {
         
         // Update UI elements that reference the old ID
         t.el.querySelector('.role-badge').setAttribute('onclick', `cycleRole('${newId}')`);
-        t.el.querySelector('.auto-btn').setAttribute('onclick', `toggleAutoContinue('${newId}')`);
         t.el.querySelector('[title="Restart Session"]').setAttribute('onclick', `restartTerminal('${newId}')`);
         t.el.querySelector('[title="Maximize"]').setAttribute('onclick', `toggleMaximize('${newId}')`);
         t.el.querySelector('[title="Close"]').setAttribute('onclick', `closeTerminal('${newId}')`);
@@ -589,4 +593,24 @@ function setupScrollListener(termObj) {
     termObj.term.onScroll(() => {
         updateScrollButtonVisibility(termObj);
     });
+}
+
+// ========== Connection Status Indicator ==========
+
+function updateConnStatus(id, status) {
+    const indicator = document.querySelector(`#term-${id} .conn-status`);
+    if (!indicator) return;
+    
+    indicator.className = `conn-status ${status}`;
+    switch (status) {
+        case 'connected':
+            indicator.title = 'Connected';
+            break;
+        case 'disconnected':
+            indicator.title = 'Disconnected - Click ↻ to reconnect';
+            break;
+        case 'connecting':
+            indicator.title = 'Connecting...';
+            break;
+    }
 }

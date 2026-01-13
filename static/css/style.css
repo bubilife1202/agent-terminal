@@ -478,6 +478,15 @@ body {
 .role-badge.Dev { color: #7aa2f7; background: rgba(122, 162, 247, 0.15); }
 .role-badge.QA { color: #f7768e; background: rgba(247, 118, 142, 0.15); }
 
+.conn-status {
+    font-size: 8px;
+    margin-left: 4px;
+    transition: color 0.3s;
+}
+.conn-status.connected { color: var(--success); }
+.conn-status.disconnected { color: var(--error); }
+.conn-status.connecting { color: var(--warning); animation: blink 1s infinite; }
+
 .term-actions { display: flex; gap: 4px; }
 .term-btn {
     width: 20px;

@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.5] - 2026-01-13
+
+### Added
+- **Connection Status Indicator**: Each terminal header now shows connection status
+  - 🟢 Green: Connected
+  - 🟡 Yellow (blinking): Connecting
+  - 🔴 Red: Disconnected
+  - Hover for tooltip with status details
+
+### Changed
+- **Manual Session Restart**: Disabled automatic reconnection on network restore
+  - Previous content preserved when connection drops
+  - User must click ↻ to start new session (allows reviewing previous work)
+  - Shows "[Connection lost. Click ↻ to start new session.]" message
+
+### Removed
+- **Auto-Continue Button**: Removed non-functional Auto button from terminal header
+
 ## [1.7.4] - 2026-01-12
 
 ### Changed

@@ -183,6 +183,7 @@ function createTerminal(type, role = 'General', id = null) {
         }
         // Ctrl+V: Paste
         if (e.ctrlKey && e.key === 'v') {
+            e.preventDefault();  // 브라우저 기본 paste 이벤트 차단
             handlePaste(termObj);
             return false;
         }
@@ -246,6 +247,20 @@ function connectTerminal(termObj, retryCount = 0) {
         }));
     };
 
+    // Track if user is at bottom for auto-scroll
+    let isUserAtBottom = true;
+
+    const checkIfAtBottom = () => {
+        const buffer = termObj.term.buffer.active;
+        return buffer.baseY + termObj.term.rows >= buffer.length;
+    };
+
+    // Update isUserAtBottom when user scrolls
+    termObj.term.onScroll(() => {
+        isUserAtBottom = checkIfAtBottom();
+        updateScrollButtonVisibility(termObj);
+    });
+
     // Throttled scroll button update (avoid per-message overhead)
     let scrollUpdatePending = false;
     const throttledScrollUpdate = () => {
@@ -264,7 +279,12 @@ function connectTerminal(termObj, retryCount = 0) {
             if (msg.type === 'terminal_output') {
                 // Write data immediately - xterm handles batching internally
                 termObj.term.write(msg.data);
-                
+
+                // Auto-scroll if user was at bottom
+                if (isUserAtBottom) {
+                    termObj.term.scrollToBottom();
+                }
+
                 // Throttled scroll button visibility update
                 throttledScrollUpdate();
                 

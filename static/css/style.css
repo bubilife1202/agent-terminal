@@ -309,9 +309,13 @@ body {
     border-bottom: 1px solid var(--border);
     min-height: 32px;
     overflow-x: auto;
-    scrollbar-width: none;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-highlight) transparent;
 }
-.project-tabs::-webkit-scrollbar { display: none; }
+.project-tabs::-webkit-scrollbar { height: 4px; }
+.project-tabs::-webkit-scrollbar-track { background: transparent; }
+.project-tabs::-webkit-scrollbar-thumb { background: var(--border-highlight); border-radius: 2px; }
+.project-tabs::-webkit-scrollbar-thumb:hover { background: var(--accent); }
 
 .project-tab {
     display: flex;
@@ -328,6 +332,9 @@ body {
     white-space: nowrap;
     transition: all 0.2s;
     position: relative;
+    flex-shrink: 1;
+    min-width: 80px;
+    max-width: 200px;
 }
 .project-tab:hover { background: rgba(255,255,255,0.05); color: var(--text-main); }
 .project-tab.active { 
@@ -335,7 +342,7 @@ body {
     color: var(--accent);
     border-bottom: 2px solid var(--accent);
 }
-.project-tab .tab-name { max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
+.project-tab .tab-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .project-tab .tab-close {
     width: 16px;
     height: 16px;

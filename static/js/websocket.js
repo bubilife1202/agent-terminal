@@ -32,14 +32,10 @@ function connectHealthCheck() {
             stateLoaded = true;
             loadState();
         } else if (wasDisconnected) {
-            // 자동 재연결 안 함 - 기존 화면 유지, 사용자가 수동으로 ↻ 눌러서 재시작
             const allTerminals = getAllTerminals();
             if (allTerminals.length > 0) {
-                showToast('Connection restored. Click ↻ to restart sessions.', 'warning');
-                // 터미널에 연결 끊김 상태 표시
-                allTerminals.forEach(t => {
-                    t.term.write('\r\n\x1b[33m[Connection lost. Click ↻ to start new session.]\x1b[0m\r\n');
-                });
+                showToast('Server reconnected. Restoring terminals...', 'success');
+                reconnectAllTerminals();
             }
         }
 

@@ -198,9 +198,16 @@ class TerminalSession:
             print(f"[Terminal] Starting: {cmd}")
             print(f"[Terminal] Working dir: {self.working_dir}")
 
+            # Set environment variables for proper terminal behavior
+            env = os.environ.copy()
+            env['TERM'] = 'xterm-256color'
+            env['COLORTERM'] = 'truecolor'
+            env['LANG'] = env.get('LANG', 'en_US.UTF-8')
+
             self.pty = PtyProcess.spawn(
                 cmd,
                 cwd=self.working_dir,
+                env=env,
                 dimensions=(24, 80)
             )
             self._running = True
@@ -231,7 +238,6 @@ class TerminalSession:
         """Read PTY output and send to WebSocket"""
         loop = asyncio.get_event_loop()
         read_count = 0
-        consecutive_empty = 0  # Track consecutive empty reads for adaptive sleep
 
         print(f"[Terminal] Read loop started for {self.session_id[:8]}...")
 
@@ -248,7 +254,6 @@ class TerminalSession:
                 )
 
                 if data:
-                    consecutive_empty = 0  # Reset on data received
                     if self.websocket:
                         read_count += 1
                         if read_count <= 3:  # Log first few reads
@@ -257,17 +262,11 @@ class TerminalSession:
                             "type": "terminal_output",
                             "data": data
                         })
-                    # Data flow active - minimal sleep for responsiveness
-                    await asyncio.sleep(0.005)
+                    # Data flow active - small sleep to prevent busy loop while maintaining responsiveness
+                    await asyncio.sleep(0.001)
                 else:
-                    # Adaptive sleep: start short, grow longer if idle
-                    consecutive_empty += 1
-                    if consecutive_empty < 5:
-                        await asyncio.sleep(0.01)   # Quick check for input response
-                    elif consecutive_empty < 20:
-                        await asyncio.sleep(0.02)   # Medium wait
-                    else:
-                        await asyncio.sleep(0.03)   # Longer wait when truly idle
+                    # No data - longer sleep to reduce CPU usage
+                    await asyncio.sleep(0.05)
 
             except Exception as e:
                 print(f"[Terminal] Read exception: {type(e).__name__}: {e}")

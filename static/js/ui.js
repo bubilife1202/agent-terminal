@@ -598,6 +598,13 @@ async function openFilePreview(path) {
             content.querySelectorAll('pre code').forEach(block => {
                 hljs.highlightElement(block);
             });
+        } else if (data.language === 'html') {
+            // Render HTML in sandboxed iframe
+            content.innerHTML = `<iframe 
+                class="file-preview-html" 
+                sandbox="allow-same-origin"
+                srcdoc="${data.content.replace(/"/g, '&quot;')}"
+            ></iframe>`;
         } else {
             // Render as code with syntax highlighting
             const escaped = escapeHtml(data.content);
